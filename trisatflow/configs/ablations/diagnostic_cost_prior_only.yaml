@@ -1,0 +1,17 @@
+extends: ../paper/satedgesim_trace_mixed_v3_safe.yaml
+
+ablation:
+  name: diagnostic_cost_prior_only
+  main_ablation_deployable: false
+  diagnostic_only: true
+  allowed_contract_diff_paths:
+    - observation.mode
+    - observation.include_cost_prior_features
+
+observation_policy: cost_prior_ablation
+include_cost_prior: true
+include_diagnostic_features: true
+observation:
+  mode: cost_prior_ablation
+  include_oracle_cost: false
+  include_cost_prior_features: true

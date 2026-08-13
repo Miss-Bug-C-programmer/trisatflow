@@ -1,0 +1,14 @@
+extends: ../paper/satedgesim_trace_mixed_v3_safe.yaml
+
+ablation:
+  name: safe_observable_full
+  main_ablation_deployable: true
+  allowed_contract_diff_paths: []
+
+observation_policy: safe_observable
+include_cost_prior: false
+include_diagnostic_features: false
+observation:
+  mode: safe_observable
+  include_oracle_cost: false
+  include_cost_prior_features: false

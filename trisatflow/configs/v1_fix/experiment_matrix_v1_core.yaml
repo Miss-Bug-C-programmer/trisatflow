@@ -1,0 +1,47 @@
+base_url: http://127.0.0.1:8088
+scenario_profile: mixed_cost_landscape_v2
+task_source_mode: round_robin_leo
+max_decisions:
+- 500
+tie_eps: 0.05
+n_leo: 16
+regret_num_states: 1024
+trace_for_regret: traces/satedgesim_real_dense_mixed_v2_seed13.jsonl
+tri_mappo_maddpg:
+  checkpoint_path_template: '{output_root}/checkpoints/seed_{seed}/upper_{upper}__lower_{lower}/checkpoint.pt'
+  train_config: trisatflow/configs/satedgesim_trace_mixed_v2_peragent_joint_logq_best.yaml
+  auto_train_if_missing: true
+  upper: mappo
+  lower: maddpg
+  eval_mode: raw_argmax
+  device: auto
+  train_episodes: 1000
+  train_steps: 128
+profiles:
+- mobility_aware_main_v1
+- mobility_stress_visible_v1
+architectures:
+- only_leo
+- leo_geo
+- leo_ground
+- full
+baselines:
+- local_only
+- neighbor_only
+- geo_only
+- ground_only
+- random_visible
+- min_delay_greedy
+- min_energy_greedy
+- queue_aware_greedy
+- mobility_risk_greedy
+- lyapunov_dpp_greedy
+- tri_mappo_maddpg
+seeds:
+- 13
+- 17
+- 23
+episodes:
+  preflight: 100
+  formal: 1000
+steps: 128

@@ -1,0 +1,26 @@
+extends: ../paper/satedgesim_trace_mixed_v3_safe.yaml
+
+ablation:
+  name: safe_visibility_only
+  main_ablation_deployable: true
+  allowed_contract_diff_paths:
+    - environment.action_mask.mode
+    - environment.action_mask.enabled
+    - environment.action_mask.enable_visibility_mask
+    - environment.action_mask.enable_completion_safe_mask
+    - environment.action_mask.enable_mobility_risk_mask
+
+observation_policy: safe_observable
+include_cost_prior: false
+include_diagnostic_features: false
+observation:
+  mode: safe_observable
+  include_oracle_cost: false
+  include_cost_prior_features: false
+environment:
+  action_mask:
+    mode: visibility
+    enabled: true
+    enable_visibility_mask: true
+    enable_completion_safe_mask: false
+    enable_mobility_risk_mask: false

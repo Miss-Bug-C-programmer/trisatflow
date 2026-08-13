@@ -1,0 +1,52 @@
+extends: ../base/satedgesim_trace_mixed_v3_common.yaml
+output_dir: outputs/paper_ready_v3/mixed_v3_safe
+observation:
+  mode: safe_observable
+  include_oracle_cost: false
+  include_cost_prior_features: false
+scenario:
+  n_leo: 12
+  topology_trace_path: traces/paper_v3/actual_projection/train/seed_13.jsonl
+  topology_trace_strict: true
+  success_profile: paper_strict
+  action_mask_mode: completion_safe
+  action_mask_layer_mode: full
+  min_link_survival_margin_sec: 0.5
+  physical:
+    enabled: true
+    slot_duration_s: 1.0
+    task_size_bits_mean: 1000000.0
+    task_size_bits_std: 0.0
+    cycles_per_bit_mean: 1000.0
+    cycles_per_bit_std: 0.0
+    metric_mode: dual
+reward:
+  mode: physical_weighted
+  delay: 1.0
+  energy: 0.05
+  queue: 0.1
+  violation: 3.0
+  infeasible: 5.0
+  load_balance: 0.08
+  lyapunov_v: 0.4
+  offload_gain: 1.0
+  local_queue_pressure: 0.6
+  remote_feasible_bonus: 0.02
+  cost_normalization_enabled: true
+  per_tier_cost_normalization: true
+  action_balance_bonus: 0.01
+  selected_when_visible_bonus: 0.005
+  ground_congestion_penalty: 0.08
+  geo_delay_penalty: 0.01
+  local_queue_penalty: 0.03
+  neighbor_link_penalty: 0.01
+  use_oracle_cost_components: false
+policy_regularization:
+  enabled: false
+  mode: none
+  weight: 0.0
+algo:
+  policy_head: gnn_only
+experiment:
+  paper_ready: true
+  split: {}

@@ -1,0 +1,12 @@
+extends: ../paper/satedgesim_trace_mixed_v3_safe.yaml
+
+ablation:
+  name: static_gnn
+  allowed_contract_diff_paths:
+    - encoder.topology_encoder
+    - encoder.temporal.enabled
+
+model:
+  topology_encoder: static_gnn
+  temporal:
+    enabled: false

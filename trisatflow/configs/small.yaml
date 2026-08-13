@@ -1,0 +1,33 @@
+total_episodes: 20
+log_interval: 1
+device: cpu
+output_dir: outputs/small
+scenario:
+  n_leo: 6
+  n_geo: 1
+  n_ground: 1
+  episode_len: 32
+  seed: 7
+  arrival_rate: 2.0
+  burst_prob: 0.08
+algo:
+  upper_algo: mappo
+  lower_algo: maddpg
+  gnn_hidden_dim: 64
+  policy_hidden_dim: 128
+  lower_batch_size: 32
+  lower_warmup: 32
+  upper_batch_size: 32
+  upper_warmup: 32
+  epsilon_start: 0.35
+  epsilon_end: 0.05
+  sac_alpha: 0.15
+  exploration_noise: 0.10
+reward:
+  delay: 1.0
+  energy: 0.08
+  queue: 0.04
+  violation: 1.5
+  infeasible: 2.0
+  load_balance: 0.05
+  lyapunov_v: 0.4

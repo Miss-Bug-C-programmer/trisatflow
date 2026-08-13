@@ -1,0 +1,16 @@
+extends: ../paper/satedgesim_trace_mixed_v3_safe.yaml
+
+ablation:
+  name: no_cost_prior
+  allowed_contract_diff_paths: []
+
+observation:
+  mode: safe_observable
+  include_oracle_cost: false
+  include_cost_prior_features: false
+policy_regularization:
+  enabled: false
+  mode: none
+  weight: 0.0
+algo:
+  policy_head: gnn_only

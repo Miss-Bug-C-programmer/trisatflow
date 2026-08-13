@@ -1,0 +1,43 @@
+base_url: http://127.0.0.1:8088
+scenario_profile: mixed_cost_landscape_v2
+task_source_mode: round_robin_leo
+max_decisions: 500
+tie_eps: 0.05
+n_leo: 16
+regret_num_states: 1024
+trace_for_regret: traces/satedgesim_real_dense_mixed_v2_seed13.jsonl
+tri_checkpoint: outputs/gpu_preflight_mixed_v2_peragent_joint_logq_best_mappo_maddpg/seed_13/upper_mappo__lower_maddpg/checkpoint.pt
+
+profiles:
+  - mobility_aware_main
+  - mobility_stress_visible
+
+architectures:
+  - only_leo
+  - leo_geo
+  - leo_ground
+  - full
+
+baselines:
+  - local_only
+  - neighbor_only
+  - geo_only
+  - ground_only
+  - random_visible
+  - min_delay_greedy
+  - min_energy_greedy
+  - queue_aware_greedy
+  - mobility_risk_greedy
+  - lyapunov_dpp_greedy
+  - tri_mappo_maddpg
+
+seeds:
+  - 13
+  - 17
+  - 23
+
+episodes:
+  preflight: 100
+  formal: 300
+
+steps: 128

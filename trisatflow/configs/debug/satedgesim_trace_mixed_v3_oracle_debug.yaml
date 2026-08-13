@@ -1,0 +1,40 @@
+extends: ../base/satedgesim_trace_mixed_v3_common.yaml
+output_dir: outputs/paper_ready_v3/mixed_v3_oracle_debug
+training:
+  episodes: 5
+observation:
+  mode: oracle_debug
+  include_oracle_cost: true
+  include_cost_prior_features: true
+reward:
+  mode: oracle_aligned_cost
+  cost_normalization_enabled: true
+  per_tier_cost_normalization: true
+  use_oracle_cost_components: true
+  use_lower_effect_in_upper_reward: false
+  include_energy: false
+  remote_bonus: 0.0
+  remote_feasible_bonus: 0.0
+  local_penalty: 0.0
+  neighbor_penalty: 0.0
+  geo_penalty: 0.0
+  ground_penalty: 0.0
+  action_balance_bonus: 0.0
+  selected_when_visible_bonus: 0.0
+  delay_weight: 1.0
+  queue_weight: 0.5
+  transmission_weight: 0.2
+  compute_weight: 0.2
+  feasibility_weight: 10.0
+policy_regularization:
+  enabled: false
+  mode: none
+  weight: 0.0
+algo:
+  policy_head: hybrid_gnn_cost
+experiment:
+  split:
+    train_seeds: [13]
+    val_seeds: []
+    test_seeds: []
+    allow_debug_seed_overlap: true

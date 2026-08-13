@@ -1,0 +1,5 @@
+profile_name: preflight_lenient
+action_mask_mode: visible_only
+success_profile: preflight_lenient
+mobility_risk_enabled: true
+intended_use: engineering_integration_only

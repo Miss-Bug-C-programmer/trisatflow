@@ -1,0 +1,4 @@
+_deprecated_wrapper: true
+canonical_config: trisatflow/configs/satedgesim_trace_mixed_v2_peragent_joint_logq_best.yaml
+deprecated_since: "2026-05-31"
+message: "Use canonical config root trisatflow/configs/."

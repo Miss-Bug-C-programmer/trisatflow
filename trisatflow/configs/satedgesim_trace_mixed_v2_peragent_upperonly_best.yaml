@@ -1,0 +1,87 @@
+device: cpu
+output_dir: outputs/diagnostic_trace_mixed_v2_peragent_upperonly_best_cpu
+training:
+  episodes: 30
+  steps_per_episode: 64
+  lower_training_enabled: false
+  lower_action_mode: neutral_allocator
+scenario:
+  n_leo: 16
+  n_geo: 2
+  n_ground: 5
+  seed: 13
+  arrival_rate: 6.0
+  burst_prob: 0.22
+  burst_multiplier: 5.0
+  max_queue: 220.0
+  deadline_threshold: 5.0
+  leo_cpu_capacity: 2.8
+  geo_cpu_capacity: 28.0
+  ground_cpu_capacity: 40.0
+  leo_energy_init: 100.0
+  tx_power_max: 1.0
+  bandwidth_max: 18.0
+  isl_base_rate: 14.0
+  geo_base_rate: 18.0
+  ground_base_rate: 22.0
+  local_prop_delay: 0.05
+  isl_prop_delay: 0.25
+  geo_prop_delay: 1.8
+  ground_prop_delay: 0.55
+  orbit_speed: 0.31
+  visibility_threshold: 0.15
+  edge_feature_dim: 4
+  node_feature_dim: 20
+  observation_mode: shared_tier_summary
+  topology_mode: satedgesim_trace
+  topology_trace_path: traces/satedgesim_real_dense_mixed_v2_seed13.jsonl
+  topology_trace_repeat: true
+  topology_trace_strict: true
+  action_mask_enabled: true
+  include_cost_features_in_obs: true
+  obs_normalization_mode: trace_p95
+  obs_normalization_path: traces/obs_norm_mixed_v2.json
+  mask_min_rate: 0.0001
+  geo_coverage_width_rad: 2.35
+  ground_coverage_width_rad: 1.40
+  gateway_drift_rate: 0.17
+  ground_backhaul_congestion: 0.25
+  geo_backhaul_congestion: 0.12
+  enable_geo: true
+  enable_ground: true
+  enable_isl: true
+  enable_dynamic_skip_isl: true
+  enable_gnn: true
+  enable_lyapunov_reward: true
+  enable_cross_layer_feedback: true
+reward:
+  mode: oracle_aligned_cost
+  cost_normalization_enabled: true
+  per_tier_cost_normalization: true
+  use_oracle_cost_components: true
+  use_lower_effect_in_upper_reward: false
+  include_energy: false
+  remote_bonus: 0.0
+  local_penalty: 0.0
+  neighbor_penalty: 0.0
+  geo_penalty: 0.0
+  ground_penalty: 0.0
+  action_balance_bonus: 0.0
+  selected_when_visible_bonus: 0.0
+policy_regularization:
+  enabled: true
+  mode: cost_prior_ce
+  weight: 0.1
+  temperature: 1.0
+algorithm:
+  upper:
+    credit_assignment: per_agent
+    entropy_coef: 0.02
+    policy_head: hybrid_gnn_cost
+    logit_centering: true
+    action_bias_regularization: 0.01
+evaluation:
+  deterministic_eval_mode: raw_argmax
+  tie_break_eps: 0.05
+  stochastic_seed: 13
+  report_raw_argmax_always: true

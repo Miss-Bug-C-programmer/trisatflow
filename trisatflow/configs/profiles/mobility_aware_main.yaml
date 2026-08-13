@@ -1,0 +1,5 @@
+profile_name: mobility_aware_main
+action_mask_mode: mobility_safe
+success_profile: paper_strict
+mobility_risk_enabled: true
+intended_use: main_evaluation_candidate

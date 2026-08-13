@@ -1,0 +1,25 @@
+total_episodes: 200
+log_interval: 5
+device: cuda
+output_dir: outputs/medium
+scenario:
+  n_leo: 32
+  n_geo: 1
+  n_ground: 2
+  episode_len: 96
+  seed: 13
+  arrival_rate: 2.4
+  burst_prob: 0.12
+algo:
+  upper_algo: mappo
+  lower_algo: maddpg
+  gnn_hidden_dim: 128
+  policy_hidden_dim: 256
+  lower_batch_size: 128
+  lower_warmup: 512
+  upper_batch_size: 128
+  upper_warmup: 512
+  epsilon_start: 0.35
+  epsilon_end: 0.05
+  sac_alpha: 0.15
+  exploration_noise: 0.12

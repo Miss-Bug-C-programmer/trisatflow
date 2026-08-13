@@ -1,0 +1,20 @@
+extends: ../small.yaml
+total_episodes: 1
+device: cpu
+scenario:
+  n_leo: 32
+  n_geo: 1
+  n_ground: 1
+  episode_len: 8
+  topology_mode: analytic
+  topology_trace_path: ""
+stress:
+  stress_name: scale_32
+  train_n_leo: 16
+  gateway_visibility_mode: nominal
+  isl_density_mode: nominal
+  burst_prob: 0.08
+  deadline_mode: nominal
+  mask_noise_level: 0.0
+  domain_shift: false
+

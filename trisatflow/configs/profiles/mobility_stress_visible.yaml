@@ -1,0 +1,5 @@
+profile_name: mobility_stress_visible
+action_mask_mode: visible_only
+success_profile: paper_strict
+mobility_risk_enabled: true
+intended_use: robustness_stress_profile

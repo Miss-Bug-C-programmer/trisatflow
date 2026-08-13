@@ -1,0 +1,55 @@
+# Python: 3.10.12
+# Target: CPU-only runnable TriSatFlow lightweight trainer/tests under trisatflow/, scripts/, tests/.
+# CUDA is NOT required and should NOT be installed.
+#
+# Install from repo root:
+#   python -m pip install --upgrade pip setuptools wheel
+#   python -m pip install -r requirements.txt
+#
+# China mainland PyPI mirror acceleration.
+-i https://pypi.tuna.tsinghua.edu.cn/simple
+--trusted-host pypi.tuna.tsinghua.edu.cn
+
+# PyTorch CPU-only wheels.
+# Required to avoid installing CUDA-enabled PyTorch dependencies from the default PyPI wheel set.
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+# Core DL stack for Python 3.10.12, CPU-only.
+torch==2.2.2+cpu
+torchvision==0.17.2+cpu
+torchaudio==2.2.2+cpu
+tensorflow-cpu==2.16.1
+
+# Numerical/config/runtime dependencies used by the TriSatFlow prototype.
+numpy==1.26.4
+PyYAML==6.0.2
+tqdm==4.66.5
+hydra-core==1.3.2
+omegaconf==2.3.0
+packaging==24.1
+typing_extensions==4.12.2
+protobuf==4.25.3
+
+# Experiment result analysis / plotting convenience.
+pandas==2.2.2
+matplotlib==3.8.4
+
+# BenchMARL-compatible auxiliary dependency from setup.py.
+av>=10.0.0,<14.0.0
+
+# Test dependency for smoke/unit tests in tests/.
+pytest==8.3.2
+
+# Optional full BenchMARL/TorchRL stack:
+# The current TriSatFlow lightweight trainer does not require these packages.
+# Keep them commented unless you specifically run upstream benchmarl/* experiments.
+# For the PyTorch 2.2.2 CPU-only stack, do NOT blindly install setup.py's torchrl~=0.10
+# because that target is for a newer TorchRL/PyTorch stack.
+#
+# torchrl==0.3.1
+# tensordict==0.3.1
+# torch-geometric==2.5.3
+# vmas>=1.3.4
+# pettingzoo[all]>=1.24.3
+# moviepy>=1.0.3
+# wandb>=0.17.0

@@ -1,0 +1,18 @@
+extends: ../paper/satedgesim_trace_mixed_v3_safe.yaml
+
+ablation:
+  name: safe_no_lyapunov
+  main_ablation_deployable: true
+  allowed_contract_diff_paths:
+    - scenario.enable_lyapunov_reward
+
+observation_policy: safe_observable
+include_cost_prior: false
+include_diagnostic_features: false
+observation:
+  mode: safe_observable
+  include_oracle_cost: false
+  include_cost_prior_features: false
+scenario:
+  enable_lyapunov_reward: false
+  lyapunov_claim_mode: inspired_reward

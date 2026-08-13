@@ -1,0 +1,19 @@
+extends: ../small.yaml
+scenario:
+  n_leo: 16
+  episode_len: 8
+  mask_source: predicted
+  link_lifetime_noise_std_s: 0.5
+  completion_time_noise_std_s: 0.5
+  mask_false_positive_rate: 0.02
+  mask_false_negative_rate: 0.02
+stress:
+  stress_name: mask_noise_mild
+  train_n_leo: 16
+  gateway_visibility_mode: nominal
+  isl_density_mode: nominal
+  burst_prob: 0.08
+  deadline_mode: nominal
+  mask_noise_level: 0.5
+  domain_shift: false
+

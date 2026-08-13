@@ -1,0 +1,16 @@
+extends: ../small.yaml
+scenario:
+  n_leo: 16
+  episode_len: 8
+  burst_prob: 0.02
+  burst_multiplier: 2.0
+stress:
+  stress_name: burst_low
+  train_n_leo: 16
+  gateway_visibility_mode: nominal
+  isl_density_mode: nominal
+  burst_prob: 0.02
+  deadline_mode: nominal
+  mask_noise_level: 0.0
+  domain_shift: false
+

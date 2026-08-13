@@ -1,0 +1,18 @@
+extends: ../paper/satedgesim_trace_mixed_v3_safe.yaml
+
+ablation:
+  name: temporal_gnn
+  allowed_contract_diff_paths:
+    - encoder.topology_encoder
+    - encoder.temporal.enabled
+    - encoder.temporal.type
+    - encoder.temporal.history_len
+    - encoder.temporal.hidden_dim
+
+model:
+  topology_encoder: temporal_gnn
+  temporal:
+    enabled: true
+    type: gnn_gru
+    history_len: 4
+    hidden_dim: 128

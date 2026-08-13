@@ -1,0 +1,23 @@
+defaults:
+  - trisatflow_mixed_small_config
+  - _self_
+
+group_name: "leo"
+include_graph_specs: true
+graph_max_edges: null
+
+scenario:
+  n_leo: 4
+  n_geo: 1
+  n_ground: 1
+  episode_len: 8
+  seed: 13
+  action_mask_enabled: true
+  action_mask_mode: visible_only
+  action_mask_layer_mode: full
+  enable_geo: true
+  enable_ground: true
+  enable_isl: true
+
+reward:
+  mode: physical_weighted

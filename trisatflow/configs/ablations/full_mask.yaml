@@ -1,0 +1,13 @@
+extends: ../paper/satedgesim_trace_mixed_v3_safe.yaml
+
+ablation:
+  name: full_mask
+  allowed_contract_diff_paths:
+    - environment.action_mask.mode
+
+environment:
+  action_mask:
+    mode: full
+    enable_visibility_mask: true
+    enable_completion_safe_mask: true
+    enable_mobility_risk_mask: true

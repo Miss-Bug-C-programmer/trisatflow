@@ -1,0 +1,19 @@
+TriSatFlow iteration smoke-test results
+
+Validated commands:
+
+1) Unit tests
+   pytest -q tests/test_env_and_training.py
+   Result: 4 passed
+
+2) Non-default algorithm-combination smoke test
+   python scripts/smoke_test.py --episodes 2 --steps 4 --n-leo 4 --upper-algo qmix --lower-algo masac --output-dir outputs/final_smoke_qmix_masac
+   Result: SMOKE_TEST_OK
+   Metrics CSV: outputs/final_smoke_qmix_masac/metrics.csv
+
+3) Sweep runner smoke test
+   python scripts/sweep_algorithm_combinations.py --config trisatflow/configs/small.yaml --upper mappo,qmix --lower maddpg,masac --episodes 1 --steps 3 --n-leo 4 --seeds 3 --output-root outputs/final_sweep_smoke --summary-window 1
+   Result: SWEEP_OK runs=4
+   Summary CSV: outputs/final_sweep_smoke/sweep_summary.csv
+
+All generated training runs persist per-episode metrics to metrics.csv and metrics.jsonl.
