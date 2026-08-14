@@ -16,7 +16,15 @@ from trisatflow.control.types import (
     PlanningBudget,
     PlannerFidelity,
     PlannerResult,
+    PlanningDescriptor,
     SMDPTransition,
+)
+from trisatflow.control.benefit import (
+    BenefitEstimate,
+    BenefitEstimator,
+    ConservativeAnalyticalBenefitEstimator,
+    CostToGoEstimate,
+    OutcomeEstimate,
 )
 from trisatflow.control.persistent_configuration import PersistentConfiguration
 from trisatflow.control.scope import ReconfigurationScope, ScopeGenerator
@@ -35,6 +43,10 @@ __all__ = [
     "ControllerContext",
     "ControllerConfig",
     "DecisionCostBreakdown",
+    "BenefitEstimate",
+    "BenefitEstimator",
+    "ConservativeAnalyticalBenefitEstimator",
+    "CostToGoEstimate",
     "DecisionDelayBreakdown",
     "DecisionDelayModel",
     "EndogenousReplanningController",
@@ -45,11 +57,13 @@ __all__ = [
     "PlannerCapabilities",
     "PlannerFidelity",
     "PlannerResult",
+    "PlanningDescriptor",
     "PlannerState",
     "PlanningBudget",
     "ReconfigurationScope",
     "ScopeGenerator",
     "PostDelayRevalidator",
     "SMDPTransition",
+    "OutcomeEstimate",
     "ViabilityReport",
 ]

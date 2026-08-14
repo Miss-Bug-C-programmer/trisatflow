@@ -55,6 +55,39 @@ class PlanningBudget:
 
 
 @dataclass
+class PlanningDescriptor:
+    """Causal, pre-planning descriptor used before heavy PlannerState acquisition.
+
+    It is intentionally not a planner result and contains no full candidate
+    enumeration.  Backends may populate it from cached statistics or a native
+    scope-aware descriptor endpoint.
+    """
+
+    planner_name: str = "unknown"
+    planner_family: str = "unknown"
+    fidelity: PlannerFidelity = PlannerFidelity.LIGHT
+    scope_cardinality: int = 0
+    scope_normalized_volume: float = 0.0
+    estimated_candidate_count: int = 0
+    estimated_observation_bytes: int = 0
+    estimated_sync_bytes: int = 0
+    estimated_compute_proxy: float = 0.0
+    estimated_solver_latency_sec: float = 0.0
+    expected_data_plane_cost: float = 0.0
+    expected_benefit_mean: float = 0.0
+    expected_benefit_uncertainty: float = 0.0
+    supports_scope_aware_acquisition: bool = False
+    supports_budget_aware_acquisition: bool = False
+    source: str = "causal_descriptor"
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        payload = asdict(self)
+        payload["fidelity"] = self.fidelity.value
+        return payload
+
+
+@dataclass
 class ClockState:
     """The three clocks used by the controller.
 
@@ -122,6 +155,10 @@ class MonitorAcquisitionMetadata:
     monitor_http_calls: int = 0
     monitor_bytes: int = 0
     monitor_latency_sec: float = 0.0
+    request_bytes: int = 0
+    response_bytes: int = 0
+    entity_count: int = 0
+    cheap_monitor_verified: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -144,6 +181,8 @@ class MonitorState:
     remaining_workload_summary: Dict[str, float] = field(default_factory=dict)
     deadline_slack: Dict[str, float] = field(default_factory=dict)
     local_load_summary: Dict[str, float] = field(default_factory=dict)
+    service_rate_lower_bound: float | None = None
+    service_horizon_sec: float | None = None
     remaining_contact_lifetime: Dict[str, float] = field(default_factory=dict)
     next_contact_summary: Dict[str, Any] = field(default_factory=dict)
     contact_slack: Dict[str, float] = field(default_factory=dict)
@@ -189,7 +228,17 @@ class PlannerCapabilities:
     supports_checkpoint: bool = False
     supports_upper_lower_hierarchy: bool = False
     supports_cost_estimation: bool = True
+    supports_scope_aware_acquisition: bool = False
+    supports_budget_aware_acquisition: bool = False
+    supports_configuration_validation: bool = False
+    supports_verified_delay_receipt: bool = False
+    supported_budget_dimensions: set[str] = field(default_factory=set)
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        payload = asdict(self)
+        payload["supported_budget_dimensions"] = sorted(self.supported_budget_dimensions)
+        return payload
 
 
 @dataclass

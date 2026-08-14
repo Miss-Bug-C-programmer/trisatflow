@@ -17,6 +17,10 @@ class ViabilityReport:
     contact_margin: float = 0.0
     deadline_margin: float = 0.0
     uncertainty_margin: float = 0.0
+    uncertainty_components: dict[str, float] = field(default_factory=dict)
+    horizon_sec: float = 0.0
+    cumulative_service_lower_bound: float = 0.0
+    opportunity_score: float = 0.0
     affected_entities: ReconfigurationScope = field(default_factory=ReconfigurationScope)
     reason_codes: list[str] = field(default_factory=list)
     needs_intervention: bool = False
@@ -26,7 +30,21 @@ class ViabilityReport:
 
     @property
     def worth_keeping(self) -> bool:
-        return not self.needs_intervention
+        return self.certifies_keep
+
+    @property
+    def certifies_keep(self) -> bool:
+        """Cheap certification only; final intervention remains VoC's job."""
+
+        return (
+            self.feasibility_status == FeasibilityStatus.VIABLE
+            and not self.needs_intervention
+            and self.confidence > 0.0
+        )
+
+    @property
+    def needs_escalation(self) -> bool:
+        return not self.certifies_keep
 
     @property
     def viability_status(self) -> str:
@@ -40,6 +58,10 @@ class ViabilityReport:
             "contact_margin": self.contact_margin,
             "deadline_margin": self.deadline_margin,
             "uncertainty_margin": self.uncertainty_margin,
+            "uncertainty_components": dict(self.uncertainty_components),
+            "horizon_sec": self.horizon_sec,
+            "cumulative_service_lower_bound": self.cumulative_service_lower_bound,
+            "opportunity_score": self.opportunity_score,
             "affected_entities": self.affected_entities.to_dict(),
             "reason_codes": list(self.reason_codes),
             "needs_intervention": self.needs_intervention,
@@ -85,12 +107,16 @@ class ConservativeViabilityEstimator:
         performance_risk_threshold: float = 0.5,
         contact_predictability: bool = True,
         use_performance_viability: bool = True,
+        evaluation_horizon_sec: float = 10.0,
+        service_safety_fraction: float = 0.1,
     ) -> None:
         self.uncertainty_margin = float(uncertainty_margin)
         self.feasibility_margin = float(feasibility_margin)
         self.performance_risk_threshold = float(performance_risk_threshold)
         self.contact_predictability = bool(contact_predictability)
         self.use_performance_viability = bool(use_performance_viability)
+        self.evaluation_horizon_sec = max(0.0, float(evaluation_horizon_sec))
+        self.service_safety_fraction = max(0.0, min(1.0, float(service_safety_fraction)))
 
     def evaluate(
         self,
@@ -104,7 +130,14 @@ class ConservativeViabilityEstimator:
             monitor_state.local_load_summary,
             default=float(monitor_state.metadata.get("lower_bound_service_capacity", 0.0)),
         )
-        service_margin = capacity - workload - self.feasibility_margin
+        horizon = max(0.0, float(monitor_state.service_horizon_sec or self.evaluation_horizon_sec))
+        explicit_rate = monitor_state.service_rate_lower_bound
+        if explicit_rate is None:
+            explicit_rate = monitor_state.metadata.get("lower_bound_service_rate", capacity)
+        contact_horizon = _summary_min(monitor_state.remaining_contact_lifetime, default=horizon)
+        effective_horizon = min(horizon, max(0.0, contact_horizon)) if contact_horizon != float("inf") else horizon
+        cumulative_service = max(0.0, float(explicit_rate)) * effective_horizon * (1.0 - self.service_safety_fraction)
+        service_margin = cumulative_service - workload - self.feasibility_margin
 
         contact_values = list(monitor_state.contact_slack.values())
         if contact_values:
@@ -173,11 +206,18 @@ class ConservativeViabilityEstimator:
             needs_intervention=needs_intervention,
             confidence=confidence,
             evaluated_at=float(monitor_state.simulation_time),
+            uncertainty_components=dict(monitor_state.prediction_uncertainty),
+            horizon_sec=horizon,
+            cumulative_service_lower_bound=cumulative_service,
+            opportunity_score=performance_risk,
             metadata={
                 "oracle_evaluation_only": False,
                 "future_stochastic_truth_used": False,
                 "feasibility_viability": feasibility.value,
                 "performance_viability": performance_worth_replanning,
+                "service_rate_lower_bound": float(explicit_rate),
+                "effective_horizon_sec": effective_horizon,
+                "horizon_semantics": "lower_bound_cumulative_service_minus_remaining_workload",
             },
         )
 

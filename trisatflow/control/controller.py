@@ -8,6 +8,7 @@ from typing import Any, Iterable, Mapping
 
 from trisatflow.adapters.backend import BackendCapabilities
 from trisatflow.control.arbitration import PlannerArbitrator, PlannerCandidate, VoC
+from trisatflow.control.benefit import ConservativeAnalyticalBenefitEstimator
 from trisatflow.control.config import ControllerConfig, budget_from_mapping
 from trisatflow.control.decision_cost import DecisionCostBreakdown, ResourceBudgetState, cost_from_monitor
 from trisatflow.control.decision_delay import DecisionDelayBreakdown, DecisionDelayModel, PostDelayRevalidator
@@ -20,6 +21,7 @@ from trisatflow.control.types import (
     FeasibilityStatus,
     MonitorState,
     PlannerResult,
+    PlanningDescriptor,
     PlannerState,
     SMDPTransition,
     coerce_fidelity,
@@ -84,6 +86,13 @@ class EndogenousReplanningController:
             feasibility_margin=self.config.viability.feasibility_margin,
             performance_risk_threshold=self.config.viability.performance_risk_threshold,
             contact_predictability=not self.config.ablations.no_contact_predictability and self.config.viability.contact_predictability,
+            evaluation_horizon_sec=self.config.viability.evaluation_horizon_sec,
+            service_safety_fraction=self.config.viability.service_safety_fraction,
+        )
+        self.benefit_estimator = ConservativeAnalyticalBenefitEstimator(
+            score_mode=("lower_confidence_bound" if self.config.ablations.lcb_voc else ("mean" if self.config.ablations.mean_voc else self.config.benefit.score_mode)),
+            lcb_beta=self.config.benefit.lcb_beta,
+            objective_weights=self.config.benefit.objective_weights,
         )
         self.scope_generator = scope_generator or ScopeGenerator(
             max_candidate_scopes=self.config.scope.max_candidate_scopes,
@@ -100,12 +109,17 @@ class EndogenousReplanningController:
             self.config.planner.enabled_backends = [str(getattr(item, "name")) for item in self.planners.values()]
         self.arbitrator = arbitrator or PlannerArbitrator(
             include_decision_cost=self.config.decision_cost.enabled,
-            no_decision_cost=self.config.planner.no_decision_cost or self.config.ablations.no_decision_cost,
+            no_decision_cost=(
+                self.config.planner.no_decision_cost
+                or self.config.ablations.no_decision_cost
+                or self.config.ablations.cost_blind_planner_selection
+            ),
         )
         self.delay_model = delay_model or DecisionDelayModel(
             mode=self._resolved_delay_mode(),
             require_physical_enforcement=self.config.decision_delay.require_physical_enforcement,
             modeled_components=self.config.decision_delay.modeled_components,
+            use_wallclock_as_simulated=self.config.decision_delay.use_wallclock_as_simulated,
         )
         self.revalidator = revalidator or PostDelayRevalidator()
         self.metrics = ControlMetrics()
@@ -118,6 +132,7 @@ class EndogenousReplanningController:
         self._last_viability: ViabilityReport | None = None
         self._last_intervention_time = 0.0
         self._initialised = False
+        self._planner_descriptors: dict[str, PlanningDescriptor] = {}
 
     def initialize(
         self,
@@ -215,7 +230,7 @@ class EndogenousReplanningController:
             )
             self._record_decision(decision)
             return decision
-        planner_state, candidates = self.select_scope_planner_budget(monitor_state, report)
+        _, candidates = self.select_scope_planner_budget(monitor_state, report)
         hold_cost = self._hold_cost(report)
         voc = self.arbitrator.choose(candidates, hold_cost=hold_cost)
         if voc.keep:
@@ -224,7 +239,7 @@ class EndogenousReplanningController:
                 monitor_state=monitor_state,
                 viability_report=report,
                 voc=voc,
-                metadata={"reason": voc.reason, "planner_state_acquired": True},
+                metadata={"reason": voc.reason, "planner_state_acquired": False},
             )
             self._record_decision(decision)
             return decision
@@ -232,6 +247,7 @@ class EndogenousReplanningController:
         selected = voc.selected
         assert selected is not None
         backend = self.planners.get(selected.planner_name)
+        planner_state = self._acquire_selected_planner_state(backend, monitor_state, selected.scope, selected.budget)
         result, delay, projected, accepted = self.execute_intervention(
             planner_state,
             backend,
@@ -251,57 +267,78 @@ class EndogenousReplanningController:
             planner_result=result,
             delay=delay,
             stale_plan_rejection=not accepted,
-            metadata={"projected_configuration": projected.to_dict() if projected else None},
+            metadata={"projected_configuration": projected.to_dict() if projected else None, "planner_state_acquired": True},
         )
         self._record_decision(decision)
         return decision
 
-    def select_scope_planner_budget(self, monitor_state: MonitorState, report: ViabilityReport) -> tuple[PlannerState, list[PlannerCandidate]]:
-        try:
-            planner_state = self.backend.get_planner_state(self.context, None, None)
-        except TypeError:
-            planner_state = self.backend.get_planner_state()
-        scopes = self.scope_generator.generate(self.current_configuration, monitor_state, planner_state, report)
+    def select_scope_planner_budget(self, monitor_state: MonitorState, report: ViabilityReport) -> tuple[PlanningDescriptor | None, list[PlannerCandidate]]:
+        """Create q descriptors without acquiring or running full planners."""
+
+        scopes = self.scope_generator.generate(self.current_configuration, monitor_state, None, report)
         if self.config.ablations.global_only_intervention:
-            global_scope = self.scope_generator._global_scope(self.current_configuration, planner_state)
+            global_scope = self.scope_generator._global_scope(self.current_configuration, None)
             scopes = [global_scope] if not global_scope.is_empty else scopes
         if self.config.ablations.fixed_intervention_scope is not None:
             scopes = [self.config.ablations.fixed_intervention_scope]
         if not scopes:
-            scopes = [self._global_scope(planner_state)]
+            global_scope = self.scope_generator._global_scope(self.current_configuration, None)
+            scopes = [global_scope] if not global_scope.is_empty else []
 
         candidates: list[PlannerCandidate] = []
         hold_cost = self._hold_cost(report)
-        improvement = max(0.0, -min(report.service_margin, report.contact_margin, report.deadline_margin))
-        improvement += report.performance_risk
+        screening_benefit = max(0.0, -min(report.service_margin, report.contact_margin, report.deadline_margin)) + report.performance_risk
         for backend in self.planners.values():
             fidelity = coerce_fidelity(getattr(backend, "fidelity", "light"))
+            if self.config.ablations.always_high_fidelity and fidelity.value != "high":
+                continue
             if self.config.planner.fidelity_levels and fidelity.value not in {str(v).lower() for v in self.config.planner.fidelity_levels}:
                 continue
             budget = self._budget_for(backend)
             for scope in scopes:
-                cost = backend.estimate_decision_cost(planner_state, self.current_configuration, scope, budget)
+                descriptor = self._describe_planner(backend, monitor_state, report, scope, budget, screening_benefit)
+                cost = backend.estimate_decision_cost(descriptor, self.current_configuration, scope, budget)
                 self._price_cost(cost)
-                # Higher fidelity can produce a larger expected improvement, but
-                # the arbitrator may reject it when its real cost dominates.
-                fidelity_multiplier = {"light": 0.75, "medium": 1.0, "high": 1.25}.get(fidelity.value, 1.0)
+                delay = self.delay_model.estimate(cost)
+                benefit = self.benefit_estimator.estimate_candidate(
+                    monitor_state,
+                    descriptor,
+                    self.current_configuration,
+                    scope,
+                    fidelity,
+                    budget,
+                    delay,
+                    self.config.benefit.evaluation_horizon_sec,
+                )
+                if self.config.ablations.heuristic_fidelity_multiplier:
+                    # Explicit legacy ablation only.  The proposed path never
+                    # uses implementation fidelity as a benefit multiplier.
+                    multiplier = {"light": 0.75, "medium": 1.0, "high": 1.25}[fidelity.value]
+                    benefit.gross_benefit *= multiplier
+                    benefit.lower_confidence_benefit *= multiplier
+                    benefit.metadata["heuristic_fidelity_multiplier"] = multiplier
                 candidates.append(
                     PlannerCandidate(
                         scope=scope,
                         fidelity=fidelity,
                         budget=budget,
                         planner_name=str(getattr(backend, "name", "unknown")),
-                        estimated_improvement=improvement * fidelity_multiplier,
-                        estimated_hold_cost=hold_cost,
+                        estimated_improvement=benefit.gross_benefit,
+                        estimated_hold_cost=benefit.hold_cost,
                         estimated_candidate_cost=cost,
+                        delay=delay,
+                        planner_descriptor=descriptor,
+                        benefit_estimate=benefit,
                         metadata={
                             "planner_family": getattr(backend, "family", "unknown"),
+                            "scope_acquisition_restricted": descriptor.supports_scope_aware_acquisition,
                             "scope_execution_restricted": bool(getattr(backend.capabilities(), "supports_scope_restriction", False)),
                             "scope_computation_restricted": bool(getattr(backend.capabilities(), "supports_scope_restriction", False)),
+                            "candidate_estimation_cost": cost.to_dict(),
                         },
                     )
                 )
-        return planner_state, candidates
+        return None, candidates
 
     def execute_intervention(
         self,
@@ -326,24 +363,60 @@ class EndogenousReplanningController:
             delay.metadata["physical_evolution_suppressed_by_ablation"] = True
         else:
             self.delay_model.enforce(self.backend, delay)
+        self.context.physical_delay_enforced = bool(delay.physical_delay_enforced)
         self._sync_clock()
         applied_at = self.clock.physical_time_sec
         projected = self._project_configuration(self.current_configuration, result.configuration, scope)
         validation = self.revalidator.revalidate(self.backend, projected, planned_at=planned_at, applied_at=applied_at)
         if not validation.accepted:
             self.metrics.stale_plan_rejection += 1
+            result.metadata["post_delay_validation"] = validation.metadata or {"reason_codes": validation.reason_codes}
             return result, delay, projected, False
+        diff_summary = previous_configuration.change_counts(projected) if previous_configuration is not None else {}
+        cost.num_changed_assignments = int(diff_summary.get("num_changed_assignments", 0))
+        cost.num_changed_resources = int(diff_summary.get("num_changed_resources", 0))
+        cost.num_changed_routes = int(diff_summary.get("num_changed_routes", 0))
+        cost.reconfiguration_bytes = int(diff_summary.get("reconfiguration_bytes", 0))
+        cost.migration_volume = float(diff_summary.get("migration_volume", 0.0))
+        cost.metadata.update(
+            {
+                "predicted_reconfiguration_volume": cost.migration_volume,
+                "configuration_diff": diff_summary.get("diff", {}),
+            }
+        )
         projected.applied_at_sim_time = applied_at
         projected.last_validated_at_sim_time = applied_at
         projected.scope_from_previous = scope
-        self._apply_backend_configuration(projected)
+        receipt = self._apply_backend_configuration(projected)
+        self._merge_apply_receipt_cost(cost, receipt, diff_summary)
+        result.decision_cost = cost
+        result.metadata.update(
+            {
+                "configuration_diff": diff_summary.get("diff", {}),
+                "configuration_change_counts": diff_summary,
+                "apply_receipt": receipt,
+                "physical_delay": delay.to_dict(),
+            }
+        )
+        projected.metadata.update(
+            {
+                "configuration_diff": diff_summary.get("diff", {}),
+                "configuration_change_counts": diff_summary,
+                "apply_receipt": receipt,
+            }
+        )
         self.current_configuration = projected
         self._last_intervention_time = applied_at
         if previous_configuration is not None:
             self.metrics.add_lifetime(max(0.0, applied_at - float(previous_configuration.applied_at_sim_time)))
         self.clock.mark_intervention()
         self._update_context()
-        self.resource_budget.update(cost)
+        self.resource_budget.update(
+            cost,
+            holding_time_sec=max(0.0, applied_at - float(getattr(previous_configuration, "applied_at_sim_time", applied_at)))
+            if previous_configuration is not None
+            else max(delay.total_delay_sec, 1.0),
+        )
         return result, delay, projected, True
 
     def dispatch_under_current_configuration(self, task: Any | None = None, *, monitor_state: MonitorState | None = None) -> Any:
@@ -399,6 +472,7 @@ class EndogenousReplanningController:
             "backend_source": capability_payload.get("backend_source", "unknown"),
             "topology_source": capability_payload.get("topology_source", "unknown"),
             "physical_delay_enforced": bool(self.context.physical_delay_enforced),
+            "physical_delay_capability": bool(getattr(getattr(self.backend, "capabilities", None), "supports_physical_decision_delay", False)),
             "monitor_state_source": capability_payload.get("monitor_state_source", "unknown"),
             "oracle_evaluation_only": True,
             "planner_registry": self.planners.metadata(),
@@ -460,6 +534,9 @@ class EndogenousReplanningController:
     ) -> dict[str, Any]:
         config = self.current_configuration
         cost = planner_result.decision_cost if planner_result is not None and isinstance(planner_result.decision_cost, DecisionCostBreakdown) else DecisionCostBreakdown()
+        measured_reconfiguration = (cost.metadata or {}).get("reconfiguration_receipt_status") == "verified"
+        realized_reconfiguration_volume = cost.actual_migration_volume if measured_reconfiguration else cost.migration_volume
+        realized_reconfiguration_bytes = cost.actual_reconfiguration_bytes if measured_reconfiguration else cost.reconfiguration_bytes
         scope = decision.scope if decision else ReconfigurationScope()
         payload = {
             "control_action": action,
@@ -499,13 +576,23 @@ class EndogenousReplanningController:
             "decision_cost": cost.decision_cost,
             "reconfiguration_cost": cost.reconfiguration_cost,
             "total_intervention_cost": cost.intervention_cost,
+            "decision_energy": float(cost.observation_energy + cost.sync_energy + cost.solver_energy_proxy + cost.signal_energy),
+            "decision_compute": float(cost.solver_compute_proxy),
             "solver_wallclock_sec": cost.solver_wallclock_sec,
-            "physical_delay_enforced": bool(self.context.physical_delay_enforced),
+            "physical_delay_enforced": bool(decision.delay.physical_delay_enforced) if decision and decision.delay is not None else False,
+            "physical_delay_capability": bool(getattr(getattr(self.backend, "capabilities", None), "supports_physical_decision_delay", False)),
             "monitor_is_true_cheap": bool(monitor.acquisition.is_true_cheap_monitor) if monitor else False,
             "monitor_bytes": int(monitor.acquisition.obs_bytes) if monitor else 0,
             "planner_state_bytes": int((getattr(planner_result, "metadata", {}) or {}).get("planner_state_bytes", 0)) if planner_result else 0,
-            "control_plane_bytes": int(cost.observation_bytes + cost.sync_bytes + cost.signal_bytes),
-            "reconfiguration_volume": scope.normalized_volume(),
+            "control_plane_bytes": int(cost.observation_bytes + cost.sync_bytes + cost.signal_bytes + realized_reconfiguration_bytes),
+            "reconfiguration_volume": float(realized_reconfiguration_volume),
+            "predicted_reconfiguration_volume": float(cost.migration_volume),
+            "actual_reconfiguration_volume": float(cost.actual_migration_volume) if measured_reconfiguration else None,
+            "actual_reconfiguration_bytes": int(realized_reconfiguration_bytes),
+            "configuration_diff": (getattr(planner_result, "metadata", {}) or {}).get("configuration_diff", {}),
+            "configuration_change_counts": (getattr(planner_result, "metadata", {}) or {}).get("configuration_change_counts", {}),
+            "reconfiguration_discrepancy": (cost.metadata or {}).get("reconfiguration_discrepancy", {}),
+            "physical_time_normalization_sec": max(self.clock.physical_time_sec, 1.0e-9),
             "num_dispatches": self.metrics.num_dispatches,
             "num_replans": self.metrics.num_replans,
             "num_configuration_changes": self.metrics.num_configuration_changes,
@@ -518,10 +605,104 @@ class EndogenousReplanningController:
         if decision and decision.delay is not None:
             payload["modeled_decision_delay_sec"] = decision.delay.total_delay_sec
             payload["physical_delay_enforced"] = decision.delay.physical_delay_enforced
+            payload["requested_decision_delay_sec"] = decision.delay.requested_delta_sec
+            payload["actual_decision_delay_sec"] = decision.delay.actual_delta_sec
+            payload["physical_delay_receipt_verified"] = decision.delay.physical_receipt_verified
+            payload["world_time_before_delay"] = decision.delay.world_time_before
+            payload["world_time_after_delay"] = decision.delay.world_time_after
         return payload
 
     def _make_empty_configuration(self) -> PersistentConfiguration:
         return PersistentConfiguration(config_id="config-0", version=0, created_at_sim_time=self.clock.physical_time_sec)
+
+    def _describe_planner(
+        self,
+        backend: PlannerBackend,
+        monitor_state: MonitorState,
+        report: ViabilityReport,
+        scope: ReconfigurationScope,
+        budget: Any,
+        screening_benefit: float,
+    ) -> PlanningDescriptor:
+        fidelity = coerce_fidelity(getattr(backend, "fidelity", "light"))
+        if hasattr(backend, "describe_planning"):
+            descriptor = backend.describe_planning(monitor_state, self.current_configuration, scope, budget)
+            if not isinstance(descriptor, PlanningDescriptor):
+                raise TypeError("Planner describe_planning must return PlanningDescriptor")
+        else:
+            capabilities = backend.capabilities()
+            descriptor = PlanningDescriptor(
+                planner_name=str(getattr(backend, "name", "unknown")),
+                planner_family=str(getattr(backend, "family", "unknown")),
+                fidelity=fidelity,
+                scope_cardinality=scope.cardinality,
+                scope_normalized_volume=scope.normalized_volume(),
+                estimated_candidate_count=0,
+                estimated_observation_bytes=int((monitor_state.metadata or {}).get("planner_observation_bytes_hint", 0)),
+                estimated_sync_bytes=0,
+                estimated_compute_proxy=0.0,
+                estimated_solver_latency_sec=0.0,
+                expected_benefit_mean=float(screening_benefit),
+                expected_benefit_uncertainty=float(max(0.0, report.uncertainty_margin)),
+                supports_scope_aware_acquisition=bool(getattr(capabilities, "supports_scope_aware_acquisition", False)),
+                supports_budget_aware_acquisition=bool(getattr(capabilities, "supports_budget_aware_acquisition", False)),
+                source="controller_causal_descriptor",
+                metadata={
+                    "full_state_acquisition_avoided": True,
+                    "future_stochastic_truth_used": False,
+                    "implementation_fidelity_label": fidelity.value,
+                },
+            )
+        descriptor.expected_benefit_mean = float(descriptor.expected_benefit_mean or screening_benefit)
+        descriptor.expected_benefit_uncertainty = float(
+            max(descriptor.expected_benefit_uncertainty, _max_mapping(monitor_state.prediction_uncertainty))
+        )
+        self._planner_descriptors[str(getattr(backend, "name", "unknown"))] = descriptor
+        return descriptor
+
+    def _acquire_selected_planner_state(
+        self,
+        backend: PlannerBackend,
+        monitor_state: MonitorState,
+        scope: ReconfigurationScope,
+        budget: Any,
+    ) -> PlannerState:
+        planner_capabilities = backend.capabilities()
+        physical_capabilities = getattr(self.backend, "capabilities", None)
+        selective = bool(getattr(planner_capabilities, "supports_scope_aware_acquisition", False)) and bool(
+            getattr(physical_capabilities, "supports_scope_aware_planner_state", False)
+        )
+        budget_aware = bool(getattr(planner_capabilities, "supports_budget_aware_acquisition", False)) and bool(
+            getattr(physical_capabilities, "supports_budget_aware_planner_state", False)
+        )
+        authoritative = bool(getattr(physical_capabilities, "authoritative_physical", False))
+        if authoritative and not selective and not self.config.ablations.full_state_acquisition_compatibility:
+            raise RuntimeError(
+                "Selected planner/backend pair cannot acquire scope-restricted planner state; "
+                "enable full_state_acquisition_compatibility only as an explicit compatibility ablation"
+            )
+        request_scope = scope if selective else None
+        request_budget = budget if budget_aware else None
+        try:
+            state = self.backend.get_planner_state(self.context, request_scope, request_budget)
+        except TypeError:
+            state = self.backend.get_planner_state()
+        if not isinstance(state, PlannerState):
+            raise TypeError(f"backend.get_planner_state must return PlannerState, got {type(state)!r}")
+        state.metadata.update(
+            {
+                "scope_acquisition_restricted": selective,
+                "budget_acquisition_restricted": budget_aware,
+                "scope_requested": scope.to_dict(),
+                "full_state_acquisition_compatibility": not selective,
+                "backend_scope_capability": bool(getattr(physical_capabilities, "supports_scope_aware_planner_state", False)),
+                "backend_budget_capability": bool(getattr(physical_capabilities, "supports_budget_aware_planner_state", False)),
+                "full_state_compatibility_ablation": bool(self.config.ablations.full_state_acquisition_compatibility),
+                "non_authoritative_backend_compatibility": not authoritative,
+                "future_stochastic_truth_used": False,
+            }
+        )
+        return state
 
     def _select_backend(self, name: str | None = None) -> PlannerBackend:
         if name:
@@ -553,6 +734,9 @@ class EndogenousReplanningController:
             old = dict(getattr(current, name) or {})
             new = dict(getattr(proposed, name) or {})
             merged = dict(old)
+            for key in old:
+                if scope.contains(key) and key not in new:
+                    merged.pop(key, None)
             for key, value in new.items():
                 if scope.contains(key):
                     merged[key] = value
@@ -566,10 +750,69 @@ class EndogenousReplanningController:
     def _apply_backend_configuration(self, configuration: PersistentConfiguration) -> Any:
         if not hasattr(self.backend, "apply_configuration"):
             raise RuntimeError("Physical backend does not expose apply_configuration")
+        capabilities = getattr(self.backend, "capabilities", None)
+        if isinstance(capabilities, BackendCapabilities) and not capabilities.supports_persistent_configuration:
+            raise RuntimeError(
+                "Backend does not advertise persistent configuration execution; "
+                "a one-shot action apply cannot stand in for Γ_k persistence"
+            )
         result = self.backend.apply_configuration(configuration)
+        if isinstance(result, Mapping) and "accepted" in result and not bool(result.get("accepted")):
+            raise RuntimeError(f"Backend rejected persistent configuration apply: {result}")
         self.context.current_config_id = configuration.config_id
         self.context.current_config_version = configuration.version
         return result
+
+    @staticmethod
+    def _merge_apply_receipt_cost(
+        cost: DecisionCostBreakdown,
+        receipt: Any,
+        predicted: Mapping[str, Any],
+    ) -> None:
+        """Overlay measured backend-side reconfiguration quantities when present."""
+
+        if not isinstance(receipt, Mapping):
+            cost.actual_reconfiguration_bytes = cost.reconfiguration_bytes
+            cost.actual_migration_volume = cost.migration_volume
+            cost.metadata["reconfiguration_receipt_status"] = "not_structured_predicted_used"
+            return
+
+        def first_number(*keys: str) -> float | None:
+            for key in keys:
+                if key in receipt:
+                    try:
+                        return float(receipt[key])
+                    except (TypeError, ValueError):
+                        continue
+            return None
+
+        actual_bytes = first_number("actualReconfigurationBytes", "actual_reconfiguration_bytes", "reconfigurationBytes")
+        actual_volume = first_number("actualMigrationVolume", "actual_migration_volume", "migrationVolume")
+        cost.actual_reconfiguration_bytes = int(actual_bytes if actual_bytes is not None else cost.reconfiguration_bytes)
+        cost.actual_migration_volume = float(actual_volume if actual_volume is not None else cost.migration_volume)
+        for field_name, keys in {
+            "num_changed_assignments": ("actualChangedAssignments", "actual_changed_assignments"),
+            "num_changed_resources": ("actualChangedResources", "actual_changed_resources"),
+            "num_changed_routes": ("actualChangedRoutes", "actual_changed_routes"),
+        }.items():
+            value = first_number(*keys)
+            if value is not None:
+                setattr(cost, field_name, int(value))
+        discrepancy = {
+            "predicted_reconfiguration_bytes": int(predicted.get("reconfiguration_bytes", 0)),
+            "actual_reconfiguration_bytes": cost.actual_reconfiguration_bytes,
+            "predicted_migration_volume": float(predicted.get("migration_volume", 0.0)),
+            "actual_migration_volume": cost.actual_migration_volume,
+        }
+        cost.metadata.update(
+            {
+                "reconfiguration_receipt_status": "verified" if any(
+                    key in receipt
+                    for key in ("actualReconfigurationBytes", "actual_reconfiguration_bytes", "actualMigrationVolume", "actual_migration_volume")
+                ) else "structured_without_measured_diff",
+                "reconfiguration_discrepancy": discrepancy,
+            }
+        )
 
     def _price_cost(self, cost: DecisionCostBreakdown) -> None:
         cost.obs_price = self.config.decision_cost.obs_price
@@ -577,6 +820,18 @@ class EndogenousReplanningController:
         cost.solve_price = self.config.decision_cost.solve_price
         cost.signal_price = self.config.decision_cost.signal_price
         cost.reconfiguration_price = self.config.decision_cost.reconfiguration_price
+        for name in (
+            "observation_byte_price", "observation_latency_price", "observation_energy_price",
+            "sync_byte_price", "sync_latency_price", "sync_energy_price", "solve_wallclock_price",
+            "solve_latency_price", "solve_compute_price", "solve_energy_price", "signal_byte_price",
+            "signal_latency_price", "signal_energy_price", "reconfiguration_byte_price",
+            "reconfiguration_volume_price", "reconfiguration_assignment_price", "reconfiguration_resource_price",
+            "reconfiguration_route_price",
+        ):
+            value = getattr(self.config.decision_cost, name, None)
+            if value is not None:
+                setattr(cost, name, float(value))
+        cost.price_provenance = "ControllerConfig.decision_cost"
 
     def _hold_cost(self, report: ViabilityReport) -> float:
         negative_margin = max(0.0, -min(report.service_margin, report.contact_margin, report.deadline_margin))
@@ -609,4 +864,14 @@ class EndogenousReplanningController:
         self.context.current_config_version = getattr(self.current_configuration, "version", None)
         self.context.backend_source = getattr(capabilities, "backend_source", "unknown")
         self.context.topology_source = getattr(capabilities, "topology_source", "unknown")
-        self.context.physical_delay_enforced = bool(getattr(capabilities, "supports_physical_decision_delay", False))
+        self.context.metadata["physical_delay_capability"] = bool(getattr(capabilities, "supports_physical_decision_delay", False))
+
+
+def _max_mapping(mapping: Mapping[str, Any] | None) -> float:
+    values: list[float] = []
+    for value in (mapping or {}).values():
+        try:
+            values.append(float(value))
+        except (TypeError, ValueError):
+            continue
+    return max(values) if values else 0.0

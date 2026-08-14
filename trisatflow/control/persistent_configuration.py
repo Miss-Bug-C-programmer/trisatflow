@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
@@ -77,6 +78,43 @@ class PersistentConfiguration:
                     "removed": sorted(before - after),
                 }
         return changed
+
+    def change_counts(self, other: "PersistentConfiguration") -> dict[str, Any]:
+        """Return structural changes between two applied configurations.
+
+        This is an execution-side accounting primitive.  It deliberately does
+        not use the requested control scope as a proxy: unchanged entries,
+        additions and removals are counted from the two concrete
+        configurations.
+        """
+
+        if not isinstance(other, PersistentConfiguration):
+            raise TypeError("change_counts expects another PersistentConfiguration")
+
+        def mapping_changes(name: str) -> tuple[int, int]:
+            before = dict(getattr(self, name) or {})
+            after = dict(getattr(other, name) or {})
+            keys = set(before) | set(after)
+            changed = sum(1 for key in keys if before.get(key) != after.get(key))
+            return changed, len(keys)
+
+        assignments, assignment_universe = mapping_changes("assignments")
+        resources, resource_universe = mapping_changes("resource_allocations")
+        routes, route_universe = mapping_changes("routes")
+        diff = self.diff(other)
+        encoded = json.dumps(diff, default=str, sort_keys=True, separators=(",", ":"))
+        return {
+            "num_changed_assignments": assignments,
+            "num_changed_resources": resources,
+            "num_changed_routes": routes,
+            "reconfiguration_bytes": len(encoded.encode("utf-8")) if diff else 0,
+            "migration_volume": self.reconfiguration_volume(other),
+            "changed_field_count": len(diff),
+            "assignment_universe": assignment_universe,
+            "resource_universe": resource_universe,
+            "route_universe": route_universe,
+            "diff": diff,
+        }
 
     def apply_patch(self, patch: Mapping[str, Any] | None = None, **kwargs: Any) -> "PersistentConfiguration":
         """Return a patched copy, preserving immutable historical versions."""

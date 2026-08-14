@@ -15,7 +15,12 @@ class BackendCapabilities:
     supports_persistent_configuration: bool = False
     supports_physical_decision_delay: bool = False
     supports_advance_world: bool = False
+    supports_scope_aware_planner_state: bool = False
+    supports_budget_aware_planner_state: bool = False
+    supports_configuration_validation: bool = False
+    supports_verified_delay_receipt: bool = False
     supports_mid_transfer_contact_enforcement: bool = False
+    supported_budget_dimensions: set[str] = field(default_factory=set)
     backend_source: str = "unknown"
     topology_source: str = "unknown"
     monitor_state_source: str = "unknown"
@@ -23,7 +28,9 @@ class BackendCapabilities:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        payload["supported_budget_dimensions"] = sorted(self.supported_budget_dimensions)
+        return payload
 
 
 class PhysicalBackend(Protocol):

@@ -33,7 +33,16 @@ class PlannerRegistry:
             name: {
                 "family": getattr(backend, "family", "unknown"),
                 "fidelity": getattr(getattr(backend, "fidelity", None), "value", getattr(backend, "fidelity", "unknown")),
-                "capabilities": getattr(backend, "capabilities")().metadata if hasattr(backend, "capabilities") else {},
+                "capabilities": _capabilities_payload(backend),
             }
             for name, backend in self._backends.items()
         }
+
+
+def _capabilities_payload(backend: PlannerBackend) -> dict[str, Any]:
+    if not hasattr(backend, "capabilities"):
+        return {}
+    capabilities = backend.capabilities()
+    if hasattr(capabilities, "to_dict"):
+        return dict(capabilities.to_dict())
+    return dict(getattr(capabilities, "metadata", {}) or {})

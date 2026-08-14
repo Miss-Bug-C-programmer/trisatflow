@@ -11,7 +11,7 @@ from typing import Any, Protocol
 
 from trisatflow.control.decision_cost import DecisionCostBreakdown
 from trisatflow.control.scope import ReconfigurationScope
-from trisatflow.control.types import PlannerCapabilities, PlannerFidelity, PlannerResult, PlanningBudget
+from trisatflow.control.types import PlannerCapabilities, PlannerFidelity, PlannerResult, PlanningBudget, PlanningDescriptor
 
 
 class PlannerBackend(Protocol):
@@ -29,6 +29,15 @@ class PlannerBackend(Protocol):
         scope: ReconfigurationScope,
         budget: PlanningBudget,
     ) -> DecisionCostBreakdown:
+        ...
+
+    def describe_planning(
+        self,
+        monitor_state: Any,
+        current_config: Any,
+        scope: ReconfigurationScope,
+        budget: PlanningBudget,
+    ) -> PlanningDescriptor:
         ...
 
     def plan(

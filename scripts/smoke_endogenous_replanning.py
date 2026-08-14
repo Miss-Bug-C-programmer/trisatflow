@@ -107,6 +107,7 @@ def main() -> int:
         {
             "decision_cost": {"obs_price": 0.0, "sync_price": 0.0, "solve_price": 0.0, "signal_price": 0.0, "reconfiguration_price": 0.0},
             "decision_delay": {"mode": "modeled", "modeled_components": ["solver"]},
+            "planner": {"budget_levels": {"light": {"metadata": {"simulated_latency_sec": 0.01}}}},
             "monitor": {"true_cheap_required": True},
         }
     )

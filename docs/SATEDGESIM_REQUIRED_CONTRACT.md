@@ -71,6 +71,21 @@ dispatch, replanning and configuration changes.
 
 ## Authority and fallback rules
 
+Stage-2 capability additions:
+
+- `/get_planner_state_scoped` is the only endpoint that can advertise
+  scope-aware planner-state acquisition; a full-state response is never
+  treated as selective sensing.
+- `/get_planner_state_budgeted` is the only endpoint that can advertise
+  budget-aware acquisition.
+- `/configuration/validate` is required for post-delay acceptance. The
+  adapter does not synthesize validation from local Python fields.
+- `/configuration/dispatch` is required for execution under the persistent
+  configuration. `/apply_action` is not relabeled as persistent execution.
+
+Missing endpoints remain capability gaps and can only be exercised through the
+explicit non-authoritative or full-state compatibility paths.
+
 `backend_source`, `topology_source`, `monitor_state_source` and
 `physical_delay_enforced` are required run metadata. A trace, analytic model or
 full-state compatibility fallback is never relabeled as authoritative SatEdgeSim

@@ -60,6 +60,14 @@ class ControlMetrics:
 
     def summary(self) -> dict[str, Any]:
         lifetimes = sorted(self.configuration_lifetimes)
+        physical_seconds = sum(
+            max(0.0, float(record.get("actual_decision_delay_sec", 0.0) or 0.0))
+            for record in self.records
+        )
+        physical_seconds = max(physical_seconds, max((float(record.get("physical_time_sec", 0.0)) for record in self.records), default=0.0), 1.0e-9)
+        decision_energy = sum(float(record.get("decision_energy", 0.0)) for record in self.records)
+        control_bytes = sum(float(record.get("control_plane_bytes", 0.0)) for record in self.records)
+        decision_compute = sum(float(record.get("decision_compute", record.get("solve_cost", 0.0))) for record in self.records)
         return {
             "num_dispatches": self.num_dispatches,
             "num_replans": self.num_replans,
@@ -76,9 +84,14 @@ class ControlMetrics:
             "data_plane_utility": sum(float(record.get("data_plane_utility", 0.0)) for record in self.records),
             "decision_plane_cost": sum(float(record.get("decision_cost", 0.0)) for record in self.records),
             "realized_end_to_end_utility": sum(float(record.get("end_to_end_utility", 0.0)) for record in self.records),
-            "decision_energy": sum(float(record.get("decision_energy", 0.0)) for record in self.records),
-            "control_bytes": sum(float(record.get("control_plane_bytes", 0.0)) for record in self.records),
-            "decision_compute": sum(float(record.get("decision_compute", record.get("solve_cost", 0.0))) for record in self.records),
+            "decision_energy": decision_energy,
+            "control_bytes": control_bytes,
+            "decision_compute": decision_compute,
+            "physical_seconds_observed": physical_seconds,
+            "decision_energy_per_physical_sec": decision_energy / physical_seconds,
+            "control_bytes_per_physical_sec": control_bytes / physical_seconds,
+            "decision_compute_per_physical_sec": decision_compute / physical_seconds,
+            "replanning_rate_per_physical_sec": self.num_replans / physical_seconds,
             "total_reconfiguration_volume": sum(float(record.get("reconfiguration_volume", 0.0)) for record in self.records),
             "unnecessary_replanning_ratio": self._oracle_ratio("unnecessary_replanning"),
             "missed_intervention_ratio": self._oracle_ratio("missed_intervention"),

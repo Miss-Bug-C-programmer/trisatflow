@@ -140,10 +140,37 @@ Compatibility/contract boundaries:
   physical-delay/advance capabilities. Python wall-clock sleep is never used
   as a substitute.
 
+## Second-phase control-plane semantics
+
+The proposed execution path now separates viability screening from planner
+arbitration. `select_scope_planner_budget` first creates causal
+`PlanningDescriptor` objects from the cheap monitor and capability metadata;
+it does not acquire `PlannerState`. Full planner state is acquired only after
+a positive VoC, and scope/budget restrictions are requested only when both the
+planner and physical backend advertise the corresponding capabilities.
+Otherwise the state acquisition is explicitly marked
+`full_state_acquisition_compatibility`.
+
+`ConservativeAnalyticalBenefitEstimator` evaluates every candidate over a
+common absolute horizon `[t, t+H]`: the old configuration remains active during
+decision delay `δ`, and the candidate is evaluated over `[t+δ, t+H]`. It uses
+current summaries, lower-bound service-rate information, cached contact
+information and planner descriptors only. It never reads future stochastic
+queues, arrivals, channels, remote load or offline oracle labels. The proposed
+path has no fidelity benefit multiplier; the old heuristic is available only
+through the explicit `heuristic_fidelity_multiplier` ablation.
+
+`DecisionCostBreakdown` keeps raw bytes, seconds, energy proxies, compute
+proxies, changed bindings and migration volume separate from their prices.
+`PersistentConfiguration.change_counts` and the backend apply receipt populate
+realized reconfiguration accounting. Scope volume is reported separately and
+is never silently reused as realized migration volume. Wall-clock solver time
+is separate from simulated physical delay, and physical delay is considered
+enforced only after a verifiable backend time advance or receipt.
+
 ## Ablation plumbing
 
 `ControllerConfig.ablations` changes components of the same controller:
 fixed-period timing, state-change trigger, global-only/fixed scope, no decision
 cost, solver-latency-only/reward-penalty delay, no contact predictability and no
 uncertainty margin. No duplicate controller implementation is required.
-

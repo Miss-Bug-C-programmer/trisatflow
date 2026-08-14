@@ -13,7 +13,7 @@ from typing import Any, Callable
 from trisatflow.control.decision_cost import DecisionCostBreakdown
 from trisatflow.control.persistent_configuration import PersistentConfiguration
 from trisatflow.control.scope import ReconfigurationScope
-from trisatflow.control.types import PlannerCapabilities, PlannerFidelity, PlannerResult, PlanningBudget
+from trisatflow.control.types import PlannerCapabilities, PlannerFidelity, PlannerResult, PlanningBudget, PlanningDescriptor
 
 
 class HierarchicalMARLPlannerAdapter:
@@ -31,6 +31,8 @@ class HierarchicalMARLPlannerAdapter:
             supports_scope_restriction=False,
             supports_candidate_restriction=False,
             supports_budget_limits=True,
+            supports_scope_aware_acquisition=False,
+            supports_budget_aware_acquisition=False,
             supports_checkpoint=self.checkpoint is not None,
             supports_upper_lower_hierarchy=True,
             metadata={
@@ -41,12 +43,37 @@ class HierarchicalMARLPlannerAdapter:
             },
         )
 
+    def describe_planning(self, monitor_state: Any, current_config: Any, scope: ReconfigurationScope, budget: PlanningBudget) -> PlanningDescriptor:
+        """Return a causal descriptor without running MAPPO/MADDPG inference."""
+
+        return PlanningDescriptor(
+            planner_name=self.name,
+            planner_family=self.family,
+            fidelity=self.fidelity,
+            scope_cardinality=scope.cardinality,
+            scope_normalized_volume=scope.normalized_volume(),
+            estimated_candidate_count=int((getattr(monitor_state, "metadata", {}) or {}).get("candidate_count_hint", 0)),
+            estimated_observation_bytes=int((getattr(monitor_state, "metadata", {}) or {}).get("planner_observation_bytes_hint", 0)),
+            estimated_sync_bytes=0,
+            estimated_compute_proxy=float(budget.max_compute_budget or 0.0),
+            estimated_solver_latency_sec=0.0,
+            expected_benefit_mean=float((getattr(monitor_state, "metadata", {}) or {}).get("marl_expected_benefit", 0.0)),
+            expected_benefit_uncertainty=float(max(0.0, _max_numeric(getattr(monitor_state, "prediction_uncertainty", {})))),
+            supports_scope_aware_acquisition=False,
+            supports_budget_aware_acquisition=False,
+            source="hierarchical_marl_cached_descriptor",
+            metadata={"full_inference_not_run": True, "scope_execution_only": True},
+        )
+
     def estimate_decision_cost(self, planner_state: Any, current_config: Any, scope: ReconfigurationScope, budget: PlanningBudget) -> DecisionCostBreakdown:
-        candidate_count = len(list(getattr(planner_state, "candidate_vms", []) or []))
+        candidate_count = int(getattr(planner_state, "estimated_candidate_count", 0) or 0)
+        if candidate_count <= 0:
+            candidate_count = len(list(getattr(planner_state, "candidate_vms", []) or []))
         return DecisionCostBreakdown(
-            observation_bytes=int(getattr(getattr(planner_state, "acquisition", None), "obs_bytes", 0)),
+            observation_bytes=int(getattr(planner_state, "estimated_observation_bytes", getattr(getattr(planner_state, "acquisition", None), "obs_bytes", 0))),
             sync_bytes=max(0, candidate_count * 16),
             solver_compute_proxy=float(max(1, budget.max_iterations or 1) * max(1, candidate_count)),
+            solver_simulated_latency_sec=max(0.0, float((budget.metadata or {}).get("simulated_latency_sec", 0.0) or 0.0)),
             signal_bytes=max(1, scope.cardinality),
             metadata={"scope_execution_restricted": True, "scope_computation_restricted": False},
         )
@@ -92,3 +119,13 @@ class HierarchicalMARLPlannerAdapter:
             decision_cost=cost,
             metadata={"scope_execution_restricted": True, "scope_computation_restricted": False, "checkpoint": self.checkpoint},
         )
+
+
+def _max_numeric(mapping: Any) -> float:
+    values = []
+    for value in (mapping or {}).values():
+        try:
+            values.append(float(value))
+        except (TypeError, ValueError):
+            continue
+    return max(values) if values else 0.0
