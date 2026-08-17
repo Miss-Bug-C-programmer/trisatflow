@@ -176,6 +176,7 @@ class MonitorState:
     simulation_time: float = 0.0
     current_config_id: Optional[str] = None
     current_config_version: Optional[int] = None
+    configuration_age_sec: float | None = None
     local_queue_summary: Dict[str, float] = field(default_factory=dict)
     source_queue_summary: Dict[str, float] = field(default_factory=dict)
     remaining_workload_summary: Dict[str, float] = field(default_factory=dict)

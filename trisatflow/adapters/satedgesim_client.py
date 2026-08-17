@@ -342,11 +342,14 @@ class SatEdgeSimBackend:
             simulation_time=self._extract_time(state),
             current_config_id=(self._configuration.config_id if self._configuration else state.get("configId")),
             current_config_version=(self._configuration.version if self._configuration else state.get("configVersion")),
+            configuration_age_sec=_optional_float(state.get("configurationAgeSec", state.get("configuration_age_sec"))),
             local_queue_summary={str(k): float(v) for k, v in queue.items() if _is_number(v)},
             source_queue_summary={str(k): float(v) for k, v in queue.items() if _is_number(v)},
             remaining_workload_summary={str(k): float(v) for k, v in (state.get("remainingWorkload", queue) or {}).items() if _is_number(v)},
             deadline_slack={str(k): float(v) for k, v in deadline.items() if _is_number(v)},
             local_load_summary={str(k): float(v) for k, v in (state.get("loadSummary", {}) or {}).items() if _is_number(v)},
+            service_rate_lower_bound=_optional_float(state.get("serviceRateLowerBound", state.get("service_rate_lower_bound"))),
+            service_horizon_sec=_optional_float(state.get("serviceHorizonSec", state.get("service_horizon_sec"))),
             remaining_contact_lifetime={str(k): float(v) for k, v in (state.get("remainingContactLifetime", {}) or {}).items() if _is_number(v)},
             next_contact_summary=dict(state.get("nextContact", {}) or {}),
             contact_slack={str(k): float(v) for k, v in contact.items() if _is_number(v)},
@@ -363,6 +366,8 @@ class SatEdgeSimBackend:
                 "compatibility_preflight": source == "compatibility_preflight",
                 "payload_kind": state.get("payloadKind", "unknown"),
                 "cheap_monitor_instrumentation": dict(instrumentation),
+                "service_rate_lower_bound_available": _optional_float(state.get("serviceRateLowerBound", state.get("service_rate_lower_bound"))) is not None,
+                "service_horizon_available": _optional_float(state.get("serviceHorizonSec", state.get("service_horizon_sec"))) is not None,
             },
         )
 
@@ -373,6 +378,10 @@ def _is_number(value: Any) -> bool:
         return True
     except (TypeError, ValueError):
         return False
+
+
+def _optional_float(value: Any) -> float | None:
+    return float(value) if _is_number(value) else None
 
 
 def _has_time(value: Mapping[str, Any]) -> bool:
