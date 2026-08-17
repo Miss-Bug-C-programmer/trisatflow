@@ -83,7 +83,17 @@ class GreedyPlanner:
                 break
             if not isinstance(candidate, Mapping):
                 continue
-            source = str(candidate.get("sourceId", candidate.get("source_id", candidate.get("leoId", "default"))))
+            explicit_source = candidate.get("sourceId", candidate.get("source_id"))
+            selector_key = "source_id" if explicit_source is not None else "node_id"
+            source = str(
+                candidate.get(
+                    "sourceId",
+                    candidate.get(
+                        "source_id",
+                        candidate.get("sourceDeviceId", candidate.get("datacenterDeviceId", candidate.get("leoId", "default"))),
+                    ),
+                )
+            )
             try:
                 score = float(candidate.get(self.score_key, candidate.get("score", 0.0)))
             except (TypeError, ValueError):
@@ -93,10 +103,18 @@ class GreedyPlanner:
                 chosen_by_source[source] = candidate
 
         assignments = deepcopy(getattr(current_config, "assignments", {}) or {})
+        reusable_rules = deepcopy(getattr(current_config, "reusable_rules", {}) or {})
         resources = deepcopy(getattr(current_config, "resource_allocations", {}) or {})
         for source, candidate in chosen_by_source.items():
             if scope.is_empty or scope.contains(source, "source") or scope.contains(source, "node"):
                 assignments[source] = deepcopy(dict(candidate))
+                explicit_source = candidate.get("sourceId", candidate.get("source_id"))
+                rule_selector_key = "source_id" if explicit_source is not None else "node_id"
+                reusable_rules[f"source:{source}"] = {
+                    "selector": {rule_selector_key: source},
+                    "assignment": deepcopy(dict(candidate)),
+                    "provenance": "greedy_planner_candidate",
+                }
                 if "resourceAllocation" in candidate:
                     resources[source] = deepcopy(candidate["resourceAllocation"])
 
@@ -105,6 +123,7 @@ class GreedyPlanner:
             version=int(getattr(current_config, "version", 0)) + 1,
         )
         next_config.assignments = assignments
+        next_config.reusable_rules = reusable_rules
         next_config.resource_allocations = resources
         next_config.planner_name = self.name
         next_config.planner_fidelity = self.fidelity.value

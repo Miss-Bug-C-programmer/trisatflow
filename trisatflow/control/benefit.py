@@ -46,6 +46,50 @@ class OutcomeEstimate:
 CostToGoEstimate = OutcomeEstimate
 
 
+class PlannerPerformanceProfile:
+    """Empirical planner/fidelity/scope/budget profile updated after outcomes.
+
+    The profile is intentionally keyed only by information known before a
+    planning call.  It cannot expose future queues, contacts, or workload
+    realisations; callers update it only when an intervention outcome has been
+    observed.
+    """
+
+    def __init__(self) -> None:
+        self._records: dict[str, dict[str, float]] = {}
+
+    @staticmethod
+    def key(planner_name: str, fidelity: Any, scope: Any, budget: Any) -> str:
+        fidelity_value = getattr(fidelity, "value", fidelity)
+        scope_volume = getattr(scope, "normalized_volume", lambda *_: 0.0)()
+        scope_bucket = getattr(scope, "derived_bucket", lambda *_: "unknown")()
+        budget_count = getattr(budget, "max_candidate_count", None)
+        return f"{planner_name}|{fidelity_value}|{scope_bucket}:{round(float(scope_volume), 6)}|candidate:{budget_count}"
+
+    def update(self, planner_name: str, fidelity: Any, scope: Any, budget: Any, realized_benefit: float) -> dict[str, Any]:
+        key = self.key(planner_name, fidelity, scope, budget)
+        record = self._records.setdefault(key, {"count": 0.0, "mean": 0.0, "m2": 0.0})
+        count = record["count"] + 1.0
+        delta = float(realized_benefit) - record["mean"]
+        record["mean"] += delta / count
+        record["m2"] += delta * (float(realized_benefit) - record["mean"])
+        record["count"] = count
+        return self.estimate(planner_name, fidelity, scope, budget)
+
+    def estimate(self, planner_name: str, fidelity: Any, scope: Any, budget: Any) -> dict[str, Any]:
+        key = self.key(planner_name, fidelity, scope, budget)
+        record = self._records.get(key)
+        if not record:
+            return {"key": key, "count": 0, "mean": 0.0, "uncertainty": 1.0, "source": "unseen_prior"}
+        count = int(record["count"])
+        variance = record["m2"] / max(1.0, float(count - 1))
+        uncertainty = (max(0.0, variance) / max(1, count)) ** 0.5
+        return {"key": key, "count": count, "mean": record["mean"], "uncertainty": uncertainty, "source": "realized_outcomes"}
+
+    def to_dict(self) -> dict[str, Any]:
+        return {key: dict(value) for key, value in self._records.items()}
+
+
 @dataclass
 class BenefitEstimate:
     hold_cost: float = 0.0
@@ -120,6 +164,7 @@ class ConservativeAnalyticalBenefitEstimator:
         score_mode: str = "mean",
         lcb_beta: float = 1.0,
         objective_weights: Mapping[str, float] | None = None,
+        performance_profile: PlannerPerformanceProfile | None = None,
     ) -> None:
         mode = str(score_mode).strip().lower()
         if mode not in {"mean", "lower_confidence_bound", "lcb"}:
@@ -135,6 +180,12 @@ class ConservativeAnalyticalBenefitEstimator:
             "configuration": 1.0,
             **dict(objective_weights or {}),
         }
+        self.performance_profile = performance_profile or PlannerPerformanceProfile()
+
+    def record_realized_outcome(
+        self, planner_name: str, fidelity: Any, scope: Any, budget: PlanningBudget, realized_benefit: float
+    ) -> dict[str, Any]:
+        return self.performance_profile.update(planner_name, fidelity, scope, budget, realized_benefit)
 
     def estimate_hold(
         self,
@@ -193,13 +244,20 @@ class ConservativeAnalyticalBenefitEstimator:
         hold = self.estimate_hold(monitor_state, current_configuration, horizon, forecast_start_time=start)
         delay = max(0.0, min(float(decision_delay.total_delay_sec), horizon))
 
+        profile = self.performance_profile.estimate(planner_descriptor.planner_name, fidelity, scope, budget)
         descriptor_benefit = float(planner_descriptor.expected_benefit_mean)
+        if int(profile.get("count", 0)) > 0:
+            descriptor_benefit = float(profile.get("mean", descriptor_benefit))
         if descriptor_benefit == 0.0:
             # A descriptor may have no learned/historical benefit. In that case
             # the conservative default is no improvement, never a free fidelity
             # multiplier or a full planner look-ahead.
             descriptor_benefit = 0.0
-        candidate_uncertainty = max(0.0, float(planner_descriptor.expected_benefit_uncertainty))
+        candidate_uncertainty = max(
+            0.0,
+            float(planner_descriptor.expected_benefit_uncertainty),
+            float(profile.get("uncertainty", 0.0)) if int(profile.get("count", 0)) > 0 else 0.0,
+        )
         candidate_base = max(0.0, hold.total_cost - descriptor_benefit)
         delay_cost = hold.total_cost * (delay / horizon) if horizon > 0.0 else 0.0
         after_delay = candidate_base * ((horizon - delay) / horizon) if horizon > 0.0 else 0.0
@@ -220,7 +278,12 @@ class ConservativeAnalyticalBenefitEstimator:
             forecast_end_time=end,
             estimator_source="conservative_analytical",
             future_stochastic_truth_used=False,
-            metadata={"descriptor": planner_descriptor.to_dict(), "fidelity_is_implementation_label": True},
+            metadata={
+                "descriptor": planner_descriptor.to_dict(),
+                "fidelity_is_implementation_label": True,
+                "planner_performance_profile": profile,
+                "profile_uses_realized_outcomes_only": True,
+            },
         )
         return BenefitEstimate(
             hold_cost=hold.total_cost,

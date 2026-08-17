@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from trisatflow.adapters.backend import BackendCapabilities
-from trisatflow.control.benefit import ConservativeAnalyticalBenefitEstimator
+from trisatflow.control.benefit import ConservativeAnalyticalBenefitEstimator, PlannerPerformanceProfile
 from trisatflow.control.decision_cost import DecisionCostBreakdown, ResourceBudgetState
 from trisatflow.control.decision_delay import DecisionDelayModel
 from trisatflow.control.persistent_configuration import PersistentConfiguration
@@ -118,3 +118,36 @@ def test_unverified_physical_advance_is_rejected_when_strict() -> None:
     )
     with pytest.raises(RuntimeError, match="verifiable physical time"):
         DecisionDelayModel(mode="modeled", require_physical_enforcement=True).enforce(NoAdvance(), delay)
+
+
+def test_reusable_configuration_rule_matches_new_task_without_task_id_enumeration() -> None:
+    config = PersistentConfiguration(
+        config_id="rules",
+        reusable_rules={
+            "source-s1": {
+                "selector": {"source_id": "s1", "traffic_phase": "burst"},
+                "assignment": {"targetVmId": 7},
+            },
+            "default": {"selector": {}, "assignment": {"targetVmId": 9}},
+        },
+    )
+    assert config.materialize_execution_rule({"task_id": "future-42", "source_id": "s1", "traffic_phase": "burst"}) == {
+        "targetVmId": 7
+    }
+    assert config.materialize_execution_rule({"task_id": "future-43", "source_id": "other"}) == {
+        "targetVmId": 9
+    }
+
+
+def test_planner_performance_profile_uses_realized_feedback_only() -> None:
+    profile = PlannerPerformanceProfile()
+    scope = ReconfigurationScope(source_ids={"s1"})
+    budget = PlanningBudget(max_candidate_count=2)
+    unseen = profile.estimate("p", PlannerFidelity.LIGHT, scope, budget)
+    assert unseen["count"] == 0
+    profile.update("p", PlannerFidelity.LIGHT, scope, budget, 2.0)
+    profile.update("p", PlannerFidelity.LIGHT, scope, budget, 4.0)
+    estimate = profile.estimate("p", PlannerFidelity.LIGHT, scope, budget)
+    assert estimate["count"] == 2
+    assert estimate["mean"] == pytest.approx(3.0)
+    assert estimate["source"] == "realized_outcomes"

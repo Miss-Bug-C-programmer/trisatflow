@@ -8,11 +8,19 @@ from typing import Any, Dict, Protocol
 
 @dataclass
 class BackendCapabilities:
+    server_version: str = "unknown"
+    control_physical_contract_version: str = "unknown"
+    supports_cheap_monitor: bool = False
     supports_monitor_state: bool = False
     supports_planner_state: bool = False
+    supports_scoped_planner_state: bool = False
+    supports_budget_aware_planner_state: bool = False
     supports_contact_plan: bool = False
+    supports_topology_snapshot: bool = False
     supports_configuration_apply: bool = False
     supports_persistent_configuration: bool = False
+    supports_persistent_configuration_execution: bool = False
+    supports_configuration_dispatch: bool = False
     supports_physical_decision_delay: bool = False
     supports_advance_world: bool = False
     supports_scope_aware_planner_state: bool = False
@@ -20,7 +28,12 @@ class BackendCapabilities:
     supports_configuration_validation: bool = False
     supports_verified_delay_receipt: bool = False
     supports_mid_transfer_contact_enforcement: bool = False
+    future_stochastic_truth_exposed: bool = False
+    physical_decision_delay_semantics_version: str = "unknown"
+    configuration_semantics_version: str = "unknown"
+    scope_dimensions: set[str] = field(default_factory=set)
     supported_budget_dimensions: set[str] = field(default_factory=set)
+    persistent_rule_dimensions: set[str] = field(default_factory=set)
     backend_source: str = "unknown"
     topology_source: str = "unknown"
     monitor_state_source: str = "unknown"
@@ -30,6 +43,8 @@ class BackendCapabilities:
     def to_dict(self) -> Dict[str, Any]:
         payload = asdict(self)
         payload["supported_budget_dimensions"] = sorted(self.supported_budget_dimensions)
+        payload["scope_dimensions"] = sorted(self.scope_dimensions)
+        payload["persistent_rule_dimensions"] = sorted(self.persistent_rule_dimensions)
         return payload
 
 

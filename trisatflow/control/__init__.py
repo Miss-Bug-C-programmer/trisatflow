@@ -25,6 +25,7 @@ from trisatflow.control.benefit import (
     ConservativeAnalyticalBenefitEstimator,
     CostToGoEstimate,
     OutcomeEstimate,
+    PlannerPerformanceProfile,
 )
 from trisatflow.control.persistent_configuration import PersistentConfiguration
 from trisatflow.control.scope import ReconfigurationScope, ScopeGenerator
@@ -65,5 +66,6 @@ __all__ = [
     "PostDelayRevalidator",
     "SMDPTransition",
     "OutcomeEstimate",
+    "PlannerPerformanceProfile",
     "ViabilityReport",
 ]

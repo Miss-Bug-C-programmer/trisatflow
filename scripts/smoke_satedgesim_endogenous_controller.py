@@ -23,24 +23,27 @@ from trisatflow.planners.greedy_planner import GreedyPlanner
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default="http://127.0.0.1:8088")
-    parser.add_argument("--timeout", type=float, default=10.0)
+    parser.add_argument("--timeout", type=float, default=30.0)
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
     client = SatEdgeSimClient(base_url=args.base_url, timeout=args.timeout)
     try:
         health = client.ensure_healthy()
-        client.reset(seed=args.seed, wait_for_first_decision=False)
+        client.reset(seed=args.seed, wait_for_first_decision=True, wait_timeout_ms=10000)
         backend = SatEdgeSimBackend(client, compatibility_preflight=True)
     except (SatEdgeSimClientError, SatEdgeSimCapabilityError, OSError) as exc:
         print(f"BLOCKED: SatEdgeSim live smoke unavailable: {exc}")
         return 2
 
     required = {
+        "supports_cheap_monitor": backend.capabilities.supports_cheap_monitor,
         "supports_monitor_state": backend.capabilities.supports_monitor_state,
         "supports_planner_state": backend.capabilities.supports_planner_state,
         "supports_configuration_apply": backend.capabilities.supports_configuration_apply,
         "supports_persistent_configuration": backend.capabilities.supports_persistent_configuration,
+        "supports_persistent_configuration_execution": backend.capabilities.supports_persistent_configuration_execution,
+        "supports_configuration_dispatch": backend.capabilities.supports_configuration_dispatch,
         "supports_scope_aware_planner_state": backend.capabilities.supports_scope_aware_planner_state,
         "supports_budget_aware_planner_state": backend.capabilities.supports_budget_aware_planner_state,
         "supports_configuration_validation": backend.capabilities.supports_configuration_validation,

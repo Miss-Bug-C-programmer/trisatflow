@@ -20,6 +20,10 @@ class PersistentConfiguration:
     source_state_id: str | None = None
     source_decision_id: str | None = None
     assignments: dict[str, Any] = field(default_factory=dict)
+    # Reusable rules are selector-based execution bindings.  A rule may match
+    # source/application/traffic/flow/node/route/resource dimensions and is
+    # reusable for tasks that have not been enumerated at configuration time.
+    reusable_rules: dict[str, Any] = field(default_factory=dict)
     resource_allocations: dict[str, Any] = field(default_factory=dict)
     routes: dict[str, Any] = field(default_factory=dict)
     covered_task_ids: set[str] = field(default_factory=set)
@@ -58,7 +62,7 @@ class PersistentConfiguration:
         if not isinstance(other, PersistentConfiguration):
             raise TypeError("diff expects another PersistentConfiguration")
         changed: dict[str, Any] = {}
-        for name in ("assignments", "resource_allocations", "routes"):
+        for name in ("assignments", "reusable_rules", "resource_allocations", "routes"):
             before = getattr(self, name)
             after = getattr(other, name)
             if before != after:
@@ -99,18 +103,21 @@ class PersistentConfiguration:
             return changed, len(keys)
 
         assignments, assignment_universe = mapping_changes("assignments")
+        rules, rule_universe = mapping_changes("reusable_rules")
         resources, resource_universe = mapping_changes("resource_allocations")
         routes, route_universe = mapping_changes("routes")
         diff = self.diff(other)
         encoded = json.dumps(diff, default=str, sort_keys=True, separators=(",", ":"))
         return {
             "num_changed_assignments": assignments,
+            "num_changed_reusable_rules": rules,
             "num_changed_resources": resources,
             "num_changed_routes": routes,
             "reconfiguration_bytes": len(encoded.encode("utf-8")) if diff else 0,
             "migration_volume": self.reconfiguration_volume(other),
             "changed_field_count": len(diff),
             "assignment_universe": assignment_universe,
+            "rule_universe": rule_universe,
             "resource_universe": resource_universe,
             "route_universe": route_universe,
             "diff": diff,
@@ -161,7 +168,7 @@ class PersistentConfiguration:
         entity_count = max(1, entity_scope.cardinality)
         changed_count = sum(
             1
-            for name in ("assignments", "resource_allocations", "routes")
+            for name in ("assignments", "reusable_rules", "resource_allocations", "routes")
             if name in changed
         )
         return min(1.0, max(changed_count, entity_count) / max(entity_count, 1))
@@ -205,9 +212,27 @@ class PersistentConfiguration:
         )
 
     def materialize_execution_rule(self, task: Mapping[str, Any] | Any) -> Any:
-        task_id = str(task.get("task_id", task.get("taskId"))) if isinstance(task, Mapping) else str(task)
+        context = dict(task) if isinstance(task, Mapping) else {"task_id": str(task)}
+        task_id = str(context.get("task_id", context.get("taskId", "")))
         if task_id in self.assignments:
             return deepcopy(self.assignments[task_id])
+        # Explicit task overrides remain the strongest binding.
+        best_rule: Any = None
+        best_score = -1
+        for rule_id, raw_rule in (self.reusable_rules or {}).items():
+            if not isinstance(raw_rule, Mapping):
+                continue
+            selector = raw_rule.get("selector", raw_rule.get("match", {})) or {}
+            if not _selector_matches(selector, context):
+                continue
+            score = _selector_specificity(selector)
+            if str(rule_id).lower() == "default":
+                score = max(0, score)
+            if score > best_score:
+                best_score = score
+                best_rule = raw_rule
+        if best_rule is not None:
+            return deepcopy(best_rule.get("assignment", best_rule.get("action", best_rule)))
         return deepcopy(self.assignments.get("default"))
 
     def to_dict(self) -> dict[str, Any]:
@@ -222,3 +247,31 @@ class PersistentConfiguration:
         ):
             payload[name] = sorted(payload[name])
         return payload
+
+
+def _selector_matches(selector: Mapping[str, Any], context: Mapping[str, Any]) -> bool:
+    """Match only decision-time task metadata, never future workload truth."""
+
+    if not selector:
+        return True
+    aliases = {
+        "task": ("task_id", "taskId"),
+        "source": ("source_id", "sourceId"),
+        "application": ("application_id", "applicationId"),
+        "traffic": ("traffic_phase", "trafficPhase"),
+        "flow": ("flow_id", "flowId"),
+        "node": ("node_id", "nodeId"),
+        "route": ("route_id", "routeId"),
+        "resource": ("resource_key", "resourceKey"),
+    }
+    for key, expected in selector.items():
+        field_names = aliases.get(str(key), (str(key),))
+        actual = next((context[name] for name in field_names if name in context), None)
+        values = expected if isinstance(expected, (list, tuple, set, frozenset)) else (expected,)
+        if actual is None or str(actual) not in {str(value) for value in values}:
+            return False
+    return True
+
+
+def _selector_specificity(selector: Mapping[str, Any]) -> int:
+    return sum(1 for value in selector.values() if value not in (None, "", [], (), set()))

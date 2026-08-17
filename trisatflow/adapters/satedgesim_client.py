@@ -47,22 +47,24 @@ class SatEdgeSimBackend:
         return self._monitor_from_payload(state, source=source, true_cheap=true_cheap)
 
     def get_planner_state(self, context: Any | None = None, scope: Any | None = None, budget: Any | None = None) -> PlannerState:
-        if scope is not None and self.capabilities.supports_scope_aware_planner_state:
-            state = self.client._request("POST", "/get_planner_state_scoped", json={"scope": _to_dict(scope)})
-            source = "/get_planner_state_scoped"
-        elif budget is not None and self.capabilities.supports_budget_aware_planner_state:
-            state = self.client._request(
-                "POST", "/get_planner_state_budgeted", json={"budget": _to_dict(budget)}
-            )
-            source = "/get_planner_state_budgeted"
+        context_metadata = getattr(context, "metadata", {}) or {}
+        payload = {
+            "scope": _to_dict(scope) if scope is not None else {},
+            "budget": _to_dict(budget) if budget is not None else {},
+            "fidelityHint": context_metadata.get("planner_fidelity") if isinstance(context_metadata, Mapping) else None,
+        }
+        if self.capabilities.supports_planner_state:
+            state = self.client._request("POST", "/get_planner_state", json=payload)
+            source = "/get_planner_state"
         else:
             state, source, _ = self._optional_or_compat("/get_planner_state", method="GET")
-        if state is None:
-            state = self._last_state or self.client.get_state()
-            source = "compatibility_preflight_get_state"
+            if state is None:
+                state = self._last_state or self.client.get_state()
+                source = "compatibility_preflight_get_state"
         candidates = list(state.get("candidateVms", state.get("candidate_vms", [])) or [])
-        if budget is not None and hasattr(budget, "restrict_count"):
-            candidates = budget.restrict_count(candidates)
+        acquisition_payload = state.get("acquisition", {}) or {}
+        requested_scope = state.get("requestedScope", payload["scope"])
+        requested_budget = state.get("requestedBudget", payload["budget"])
         return PlannerState(
             simulation_time=self._extract_time(state),
             candidate_vms=[dict(item) for item in candidates if isinstance(item, Mapping)],
@@ -76,11 +78,26 @@ class SatEdgeSimBackend:
                 num_queries=1,
                 source=source,
                 is_true_cheap_monitor=False,
+                request_bytes=len(json.dumps(payload, default=str).encode("utf-8")),
+                response_bytes=len(json.dumps(state, default=str).encode("utf-8")),
+                entity_count=len(candidates),
             ),
             metadata={
                 "backend_source": "satedgesim",
                 "topology_source": self.capabilities.topology_source,
                 "future_stochastic_truth_used": False,
+                "requested_scope": requested_scope,
+                "requested_budget": requested_budget,
+                "applied_scope": state.get("appliedScope", requested_scope),
+                "applied_budget": state.get("appliedBudget", requested_budget),
+                "scope_restriction_applied": bool(state.get("scopeRestrictionApplied", False)),
+                "budget_restriction_applied": bool(state.get("budgetRestrictionApplied", False)),
+                "budget_applied_during_acquisition": bool(state.get("budgetAppliedDuringAcquisition", False)),
+                "post_filter_only": bool(state.get("postFilterOnly", False)),
+                "full_state_equivalent": bool(state.get("fullStateEquivalent", False)),
+                "candidate_count_before_restriction": state.get("candidateCountBeforeRestriction"),
+                "candidate_count_after_restriction": state.get("candidateCountAfterRestriction", len(candidates)),
+                "acquisition": acquisition_payload,
             },
         )
 
@@ -90,7 +107,7 @@ class SatEdgeSimBackend:
         return self.client._request("POST", "/topology/contact_plan", json=dict(request))
 
     def get_current_topology(self) -> Mapping[str, Any]:
-        if not self._endpoint_available("/topology/current", method="GET"):
+        if not self.capabilities.supports_topology_snapshot:
             raise SatEdgeSimCapabilityError("SatEdgeSim topology endpoint is not available")
         return self.client._request("GET", "/topology/current")
 
@@ -110,7 +127,7 @@ class SatEdgeSimBackend:
         return result
 
     def dispatch_under_configuration(self, configuration: PersistentConfiguration, task: Any | None = None) -> Mapping[str, Any]:
-        if not bool(self.capabilities.metadata.get("endpoint_probe", {}).get("/configuration/dispatch", False)):
+        if not self.capabilities.supports_configuration_dispatch:
             raise SatEdgeSimCapabilityError(
                 "SatEdgeSim exposes no native persistent-configuration dispatch endpoint; "
                 "apply_action cannot be relabeled as execution under Γ_k"
@@ -129,7 +146,10 @@ class SatEdgeSimBackend:
             )
         result = self.client._request("POST", "/advance_world", json={"deltaSec": float(delta_sec)})
         # A pre-advance cache must not be used as proof of physical evolution.
-        self._last_state = dict(result) if isinstance(result, Mapping) and _has_time(result) else {}
+        # The backend resumes after reaching the target.  Do not retain the
+        # target receipt as a stale current-time cache; the next read must
+        # observe the live CloudSim state.
+        self._last_state = {}
         return result
 
     def validate_configuration(self, configuration: PersistentConfiguration) -> Mapping[str, Any]:
@@ -155,6 +175,48 @@ class SatEdgeSimBackend:
         }
 
     def _detect_capabilities(self) -> BackendCapabilities:
+        try:
+            declared = self.client._request("GET", "/capabilities")
+            if isinstance(declared, Mapping) and declared.get("controlPhysicalContractVersion"):
+                budget_dimensions = declared.get("budgetDimensions", []) or []
+                scope_dimensions = declared.get("scopeDimensions", []) or []
+                persistent_dimensions = declared.get("persistentRuleDimensions", []) or []
+                return BackendCapabilities(
+                    server_version=str(declared.get("serverVersion", "unknown")),
+                    control_physical_contract_version=str(declared.get("controlPhysicalContractVersion", "unknown")),
+                    supports_cheap_monitor=bool(declared.get("supportsCheapMonitor", False)),
+                    supports_monitor_state=bool(declared.get("supportsCheapMonitor", declared.get("supportsMonitorState", False))),
+                    supports_planner_state=bool(declared.get("supportsScopedPlannerState", declared.get("supportsPlannerState", False))),
+                    supports_scoped_planner_state=bool(declared.get("supportsScopedPlannerState", False)),
+                    supports_budget_aware_planner_state=bool(declared.get("supportsBudgetAwarePlannerState", False)),
+                    supports_scope_aware_planner_state=bool(declared.get("supportsScopedPlannerState", False)),
+                    supports_contact_plan=bool(declared.get("supportsContactPlan", False)),
+                    supports_topology_snapshot=bool(declared.get("supportsTopologySnapshot", False)),
+                    supports_configuration_apply=bool(declared.get("supportsConfigurationApply", False)),
+                    supports_persistent_configuration=bool(declared.get("supportsPersistentConfigurationExecution", False)),
+                    supports_persistent_configuration_execution=bool(declared.get("supportsPersistentConfigurationExecution", False)),
+                    supports_configuration_dispatch=bool(declared.get("supportsConfigurationDispatch", False)),
+                    supports_physical_decision_delay=bool(declared.get("supportsPhysicalDecisionDelay", False)),
+                    supports_advance_world=bool(declared.get("supportsAdvanceWorld", False)),
+                    supports_configuration_validation=bool(declared.get("supportsConfigurationValidation", False)),
+                    supports_mid_transfer_contact_enforcement=bool(declared.get("supportsMidTransferContactEnforcement", False)),
+                    supports_verified_delay_receipt=False,
+                    future_stochastic_truth_exposed=bool(declared.get("futureStochasticTruthExposed", False)),
+                    physical_decision_delay_semantics_version=str(declared.get("physicalDecisionDelaySemanticsVersion", "unknown")),
+                    configuration_semantics_version=str(declared.get("configurationSemanticsVersion", "unknown")),
+                    scope_dimensions={str(value) for value in scope_dimensions},
+                    supported_budget_dimensions={str(value) for value in budget_dimensions},
+                    persistent_rule_dimensions={str(value) for value in persistent_dimensions},
+                    backend_source="satedgesim",
+                    topology_source=str(declared.get("topologySource", "unknown")),
+                    monitor_state_source=str(declared.get("monitorSource", "unknown")),
+                    authoritative_physical=bool(declared.get("authoritativePhysicalBackend", False)),
+                    metadata={"capability_declaration": dict(declared), "compatibility_preflight": bool(self.compatibility_preflight)},
+                )
+        except Exception:
+            # Older SatEdgeSim builds have no declaration endpoint.  Keep the
+            # probe path as an explicitly labelled compatibility fallback.
+            pass
         endpoints = {
             "/get_monitor_state": self._endpoint_available("/get_monitor_state", method="GET"),
             "/get_planner_state": self._endpoint_available("/get_planner_state", method="GET"),
@@ -164,19 +226,24 @@ class SatEdgeSimBackend:
             "/configuration/dispatch": self._endpoint_available("/configuration/dispatch", method="POST"),
             "/configuration/validate": self._endpoint_available("/configuration/validate", method="POST"),
             "/advance_world": self._endpoint_available("/advance_world", method="POST"),
-            "/get_planner_state_scoped": self._endpoint_available("/get_planner_state_scoped", method="POST"),
-            "/get_planner_state_budgeted": self._endpoint_available("/get_planner_state_budgeted", method="POST"),
         }
         return BackendCapabilities(
+            server_version="legacy-probe",
+            control_physical_contract_version="legacy",
+            supports_cheap_monitor=endpoints["/get_monitor_state"],
             supports_monitor_state=endpoints["/get_monitor_state"],
             supports_planner_state=endpoints["/get_planner_state"],
+            supports_scoped_planner_state=False,
+            supports_budget_aware_planner_state=False,
             supports_contact_plan=endpoints["/topology/contact_plan"],
+            supports_topology_snapshot=endpoints["/topology/current"],
             supports_configuration_apply=endpoints["/configuration/apply"],
             supports_persistent_configuration=(endpoints["/configuration/apply"] and endpoints["/configuration/dispatch"]),
+            supports_persistent_configuration_execution=(endpoints["/configuration/apply"] and endpoints["/configuration/dispatch"]),
+            supports_configuration_dispatch=endpoints["/configuration/dispatch"],
             supports_physical_decision_delay=endpoints["/advance_world"],
             supports_advance_world=endpoints["/advance_world"],
-            supports_scope_aware_planner_state=endpoints["/get_planner_state_scoped"],
-            supports_budget_aware_planner_state=endpoints["/get_planner_state_budgeted"],
+            supports_scope_aware_planner_state=False,
             supports_configuration_validation=endpoints["/configuration/validate"],
             # Endpoint discovery is not proof that the server returns a
             # verifiable physical-time receipt.  The delay model verifies
@@ -186,8 +253,8 @@ class SatEdgeSimBackend:
             supported_budget_dimensions={
                 value
                 for value, enabled in (
-                    ("scope", endpoints["/get_planner_state_scoped"]),
-                    ("budget", endpoints["/get_planner_state_budgeted"]),
+                    ("scope", False),
+                    ("budget", False),
                 )
                 if enabled
             },
@@ -198,6 +265,7 @@ class SatEdgeSimBackend:
             metadata={
                 "endpoint_probe": endpoints,
                 "compatibility_preflight": bool(self.compatibility_preflight),
+                "formal_capabilities_unavailable": True,
             },
         )
 
@@ -239,6 +307,15 @@ class SatEdgeSimBackend:
         return 0.0
 
     def _monitor_from_payload(self, state: Mapping[str, Any], *, source: str, true_cheap: bool) -> MonitorState:
+        instrumentation = state.get("instrumentation", {}) or {}
+        payload_is_cheap = state.get("payloadKind") == "cheap_monitor"
+        true_cheap = bool(
+            true_cheap
+            and payload_is_cheap
+            and instrumentation.get("candidateEvaluations") == 0
+            and instrumentation.get("fullStateBuilderInvoked") is False
+            and state.get("containsFutureStochasticState") is False
+        )
         payload_bytes = len(json.dumps(state, default=str).encode("utf-8"))
         queue = state.get("queueSummary", state.get("queue", {})) or {}
         if not isinstance(queue, Mapping):
@@ -284,6 +361,8 @@ class SatEdgeSimBackend:
                 "monitor_source": source,
                 "future_stochastic_truth_used": False,
                 "compatibility_preflight": source == "compatibility_preflight",
+                "payload_kind": state.get("payloadKind", "unknown"),
+                "cheap_monitor_instrumentation": dict(instrumentation),
             },
         )
 

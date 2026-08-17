@@ -8,7 +8,7 @@ from typing import Any, Iterable, Mapping
 
 from trisatflow.adapters.backend import BackendCapabilities
 from trisatflow.control.arbitration import PlannerArbitrator, PlannerCandidate, VoC
-from trisatflow.control.benefit import ConservativeAnalyticalBenefitEstimator
+from trisatflow.control.benefit import ConservativeAnalyticalBenefitEstimator, PlannerPerformanceProfile
 from trisatflow.control.config import ControllerConfig, budget_from_mapping
 from trisatflow.control.decision_cost import DecisionCostBreakdown, ResourceBudgetState, cost_from_monitor
 from trisatflow.control.decision_delay import DecisionDelayBreakdown, DecisionDelayModel, PostDelayRevalidator
@@ -89,10 +89,12 @@ class EndogenousReplanningController:
             evaluation_horizon_sec=self.config.viability.evaluation_horizon_sec,
             service_safety_fraction=self.config.viability.service_safety_fraction,
         )
+        self.performance_profile = PlannerPerformanceProfile()
         self.benefit_estimator = ConservativeAnalyticalBenefitEstimator(
             score_mode=("lower_confidence_bound" if self.config.ablations.lcb_voc else ("mean" if self.config.ablations.mean_voc else self.config.benefit.score_mode)),
             lcb_beta=self.config.benefit.lcb_beta,
             objective_weights=self.config.benefit.objective_weights,
+            performance_profile=self.performance_profile,
         )
         self.scope_generator = scope_generator or ScopeGenerator(
             max_candidate_scopes=self.config.scope.max_candidate_scopes,
@@ -128,11 +130,30 @@ class EndogenousReplanningController:
             average_control_bytes_budget=self.config.decision_cost.average_control_bytes_budget,
             average_decision_compute_budget=self.config.decision_cost.average_decision_compute_budget,
         )
+
         self._last_monitor: MonitorState | None = None
         self._last_viability: ViabilityReport | None = None
         self._last_intervention_time = 0.0
         self._initialised = False
         self._planner_descriptors: dict[str, PlanningDescriptor] = {}
+
+    def record_realized_planner_outcome(self, decision: ControlDecision, realized_benefit: float) -> dict[str, Any]:
+        """Feed back an observed outcome; never call this with future truth."""
+
+        if decision is None or not decision.planner_name:
+            return {"updated": False, "reason": "no_planner_decision"}
+        return {
+            "updated": True,
+            "profile": self.performance_profile.update(
+                decision.planner_name,
+                decision.planner_fidelity,
+                decision.scope,
+                budget_from_mapping(decision.planning_budget),
+                float(realized_benefit),
+            ),
+            "source": "realized_execution_outcome",
+            "future_stochastic_truth_used": False,
+        }
 
     def initialize(
         self,
@@ -683,6 +704,7 @@ class EndogenousReplanningController:
             )
         request_scope = scope if selective else None
         request_budget = budget if budget_aware else None
+        self.context.metadata["planner_fidelity"] = getattr(getattr(backend, "fidelity", None), "value", getattr(backend, "fidelity", "light"))
         try:
             state = self.backend.get_planner_state(self.context, request_scope, request_budget)
         except TypeError:
@@ -730,7 +752,7 @@ class EndogenousReplanningController:
             config_id=proposed.config_id,
             version=proposed.version,
         )
-        for name in ("assignments", "resource_allocations", "routes"):
+        for name in ("assignments", "reusable_rules", "resource_allocations", "routes"):
             old = dict(getattr(current, name) or {})
             new = dict(getattr(proposed, name) or {})
             merged = dict(old)
