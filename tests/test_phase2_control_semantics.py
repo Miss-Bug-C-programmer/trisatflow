@@ -25,6 +25,7 @@ def _monitor() -> MonitorState:
         local_load_summary={"service_rate": 2.0},
         deadline_slack={"s1": 4.0},
         prediction_uncertainty={"service": 0.2},
+        uncertainty_evidence_available=True,
         acquisition=MonitorAcquisitionMetadata(is_true_cheap_monitor=True),
         metadata={"future_queue": [9999], "future_stochastic_truth_used": False},
     )

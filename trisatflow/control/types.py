@@ -182,14 +182,20 @@ class MonitorState:
     remaining_workload_summary: Dict[str, float] = field(default_factory=dict)
     deadline_slack: Dict[str, float] = field(default_factory=dict)
     local_load_summary: Dict[str, float] = field(default_factory=dict)
+    service_rate_observed: float | None = None
     service_rate_lower_bound: float | None = None
+    service_bound_certified: bool = False
     service_horizon_sec: float | None = None
+    service_rate_source: str | None = None
+    service_bound_semantics: str | None = None
     remaining_contact_lifetime: Dict[str, float] = field(default_factory=dict)
     next_contact_summary: Dict[str, Any] = field(default_factory=dict)
     contact_slack: Dict[str, float] = field(default_factory=dict)
     small_neighborhood_state: Dict[str, Any] = field(default_factory=dict)
     cached_state: Dict[str, Any] = field(default_factory=dict)
     prediction_uncertainty: Dict[str, float] = field(default_factory=dict)
+    uncertainty_evidence_available: bool = False
+    uncertainty_source: str | None = None
     degradation_indicators: Dict[str, float] = field(default_factory=dict)
     acquisition: MonitorAcquisitionMetadata = field(default_factory=MonitorAcquisitionMetadata)
     metadata: Dict[str, Any] = field(default_factory=dict)

@@ -6,8 +6,185 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping
 
 
+_AGGREGATE_KEYS = {
+    "total",
+    "current",
+    "arrivedtaskcount",
+    "unfinishedtaskcount",
+    "pendingdecision",
+    "futuretaskcount",
+    "queue",
+    "load",
+    "servicerate",
+}
+
+_ENTITY_TYPES = {
+    "task_ids": "task",
+    "source_ids": "source",
+    "node_ids": "node",
+    "link_ids": "link",
+    "route_ids": "route",
+    "resource_keys": "resource",
+}
+
+
 def _normalise(values: Iterable[Any] | None) -> set[str]:
+    if values is None:
+        return set()
+    if isinstance(values, (str, bytes)):
+        return {str(values)}
     return {str(value) for value in (values or ())}
+
+
+def _clean_typed_id(value: Any, entity_type: str) -> str | None:
+    text = str(value).strip()
+    if not text:
+        return None
+    lowered = text.lower()
+    if _is_aggregate_id(lowered):
+        return None
+    prefixes = (f"{entity_type}:", f"{entity_type}_id:", f"{entity_type}id:")
+    for prefix in prefixes:
+        if lowered.startswith(prefix):
+            text = text[len(prefix):].strip()
+            return text or None
+    if entity_type == "source":
+        return None
+    return text
+
+
+def _is_aggregate_id(value: Any) -> bool:
+    text = str(value).strip().lower()
+    if text in _AGGREGATE_KEYS:
+        return True
+    prefixes = (
+        "task:", "task_id:", "taskid:",
+        "source:", "source_id:", "sourceid:",
+        "node:", "node_id:", "nodeid:",
+        "link:", "link_id:", "linkid:",
+        "route:", "route_id:", "routeid:",
+        "resource:", "resource_key:", "resourcekey:",
+    )
+    return any(text.startswith(prefix) and text[len(prefix):] in _AGGREGATE_KEYS for prefix in prefixes)
+
+
+def _clean_explicit_id(value: Any, entity_type: str) -> str | None:
+    """Normalize an explicit typed hint while accepting canonical bare ids."""
+
+    text = str(value).strip()
+    if not text or _is_aggregate_id(text):
+        return None
+    lowered = text.lower()
+    prefixes = (f"{entity_type}:", f"{entity_type}_id:", f"{entity_type}id:")
+    if entity_type == "resource":
+        prefixes = (*prefixes, "resource_key:", "resourcekey:")
+    for prefix in prefixes:
+        if lowered.startswith(prefix):
+            text = text[len(prefix):].strip()
+            return text if text and not _is_aggregate_id(text) else None
+    return text
+
+
+def _values_from_mapping(value: Any) -> Iterable[Any]:
+    if isinstance(value, Mapping):
+        return value.keys()
+    if isinstance(value, (str, bytes)):
+        return (value,)
+    return value or ()
+
+
+def _scope_from_typed_mapping(mapping: Mapping[str, Any]) -> "ReconfigurationScope":
+    payload: dict[str, set[str]] = {}
+    for field_name, entity_type in _ENTITY_TYPES.items():
+        raw = mapping.get(field_name)
+        if raw is None:
+            continue
+        payload[field_name] = {
+            parsed
+            for value in _values_from_mapping(raw)
+            if (parsed := _clean_explicit_id(value, entity_type)) is not None
+        }
+    return ReconfigurationScope(**payload)
+
+
+def _typed_metadata_scope(metadata: Mapping[str, Any]) -> "ReconfigurationScope":
+    aliases = {
+        "affectedTaskIds": "task_ids",
+        "affectedSourceIds": "source_ids",
+        "affectedNodeIds": "node_ids",
+        "affectedLinkIds": "link_ids",
+        "affectedRouteIds": "route_ids",
+        "affectedResourceKeys": "resource_keys",
+    }
+    nested = metadata.get("affected_entity_hints")
+    source_metadata = nested if isinstance(nested, Mapping) else metadata
+    canonical = {
+        field_name: source_metadata[key]
+        for key, field_name in aliases.items()
+        if key in source_metadata
+    }
+    return _scope_from_typed_mapping(canonical)
+
+
+def _remove_aggregate_ids(scope: "ReconfigurationScope") -> "ReconfigurationScope":
+    payload = {}
+    for field_name in ReconfigurationScope._fields():
+        payload[field_name] = {
+            value for value in getattr(scope, field_name)
+            if not _is_aggregate_id(value)
+        }
+    return ReconfigurationScope(**payload)
+
+
+def extract_typed_affected_entities(monitor_state: Any, current_config: Any | None = None) -> "ReconfigurationScope":
+    """Extract typed entity ids without treating aggregate keys as entities."""
+
+    metadata = getattr(monitor_state, "metadata", {}) or {}
+    explicit = metadata.get("affected_entities")
+    if isinstance(explicit, ReconfigurationScope):
+        result = _remove_aggregate_ids(explicit)
+    elif isinstance(explicit, Mapping):
+        result = _remove_aggregate_ids(_scope_from_typed_mapping(explicit))
+    else:
+        result = ReconfigurationScope()
+
+    result = _remove_aggregate_ids(result.union(_typed_metadata_scope(metadata)))
+    sources: set[str] = set()
+    for field_name in ("remaining_workload_summary", "source_queue_summary"):
+        mapping = getattr(monitor_state, field_name, {}) or {}
+        if isinstance(mapping, Mapping):
+            for key in mapping:
+                parsed = _clean_typed_id(key, "source")
+                if parsed is not None:
+                    sources.add(parsed)
+
+    tasks: set[str] = set()
+    deadlines = getattr(monitor_state, "deadline_slack", {}) or {}
+    if isinstance(deadlines, Mapping):
+        for key in deadlines:
+            parsed = _clean_typed_id(key, "task")
+            if parsed is not None:
+                tasks.add(parsed)
+
+    for field_name in ("contact_slack", "remaining_contact_lifetime"):
+        mapping = getattr(monitor_state, field_name, {}) or {}
+        if isinstance(mapping, Mapping):
+            for key in mapping:
+                parsed = _task_id_from_transfer_key(key)
+                if parsed is not None:
+                    tasks.add(parsed)
+
+    result = _remove_aggregate_ids(result.union(ReconfigurationScope(task_ids=tasks, source_ids=sources)))
+    if result.is_empty and current_config is not None:
+        result = result.union(_remove_aggregate_ids(current_config.affected_entities()))
+    return _remove_aggregate_ids(result)
+
+
+def _task_id_from_transfer_key(value: Any) -> str | None:
+    parts = str(value).strip().split(":", 2)
+    if len(parts) != 3 or parts[0].lower() != "transfer":
+        return None
+    return _clean_explicit_id(parts[1], "task")
 
 
 @dataclass
@@ -35,7 +212,15 @@ class ReconfigurationScope:
             "route_ids",
             "resource_keys",
         ):
-            setattr(self, name, _normalise(getattr(self, name)))
+            setattr(
+                self,
+                name,
+                {
+                    value
+                    for value in _normalise(getattr(self, name))
+                    if not _is_aggregate_id(value)
+                },
+            )
 
     @property
     def is_empty(self) -> bool:
@@ -198,14 +383,7 @@ class ScopeGenerator:
 
     @staticmethod
     def _from_observation(monitor_state: Any, current_config: Any) -> ReconfigurationScope:
-        tasks = set()
-        sources = set()
-        for key in ("remaining_workload_summary", "deadline_slack", "source_queue_summary"):
-            value = getattr(monitor_state, key, {}) or {}
-            if isinstance(value, Mapping):
-                sources.update(str(k) for k in value)
-        tasks.update(str(v) for v in (getattr(current_config, "covered_task_ids", set()) or set()))
-        return ReconfigurationScope(task_ids=tasks, source_ids=sources)
+        return extract_typed_affected_entities(monitor_state, current_config)
 
     @staticmethod
     def _expand_dependencies(scope: ReconfigurationScope, graph: Mapping[str, Any]) -> ReconfigurationScope:

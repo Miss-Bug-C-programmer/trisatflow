@@ -53,7 +53,12 @@ class FakeBackend:
             remaining_workload_summary={"s1": 1.0 if not degraded else 9.0},
             deadline_slack={"s1": 10.0 if not degraded else -1.0},
             local_load_summary={"service": 10.0},
+            service_rate_lower_bound=10.0,
+            service_bound_certified=True,
+            service_horizon_sec=10.0,
             contact_slack={"l1": 10.0 if not degraded else -1.0},
+            prediction_uncertainty={"service": 0.0},
+            uncertainty_evidence_available=True,
             degradation_indicators={"risk": 0.0 if not degraded else 0.9},
             acquisition=MonitorAcquisitionMetadata(obs_bytes=10, num_queries=1, source="fake", is_true_cheap_monitor=True),
             metadata={"affected_entities": {"source_ids": {"s1"}}, "future_queue_truth": "must_not_be_consumed"},
@@ -138,8 +143,13 @@ def test_feasibility_and_performance_viability_are_separate():
     monitor = MonitorState(
         remaining_workload_summary={"s": 1.0},
         local_load_summary={"service": 10.0},
+        service_rate_lower_bound=10.0,
+        service_bound_certified=True,
+        service_horizon_sec=10.0,
         deadline_slack={"s": 10.0},
         contact_slack={"l": 10.0},
+        prediction_uncertainty={"service": 0.0},
+        uncertainty_evidence_available=True,
         degradation_indicators={"risk": 0.0},
         acquisition=MonitorAcquisitionMetadata(is_true_cheap_monitor=True),
     )
@@ -157,8 +167,13 @@ def test_contact_or_deadline_margin_triggers_intervention():
     monitor = MonitorState(
         remaining_workload_summary={"s": 1.0},
         local_load_summary={"service": 10.0},
+        service_rate_lower_bound=10.0,
+        service_bound_certified=True,
+        service_horizon_sec=10.0,
         deadline_slack={"s": -0.1},
         contact_slack={"l": 10.0},
+        prediction_uncertainty={"service": 0.0},
+        uncertainty_evidence_available=True,
         acquisition=MonitorAcquisitionMetadata(is_true_cheap_monitor=True),
     )
     report = estimator.evaluate(monitor, config())

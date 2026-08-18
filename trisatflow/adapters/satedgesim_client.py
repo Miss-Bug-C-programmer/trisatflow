@@ -31,7 +31,13 @@ class SatEdgeSimBackend:
         return self._capabilities
 
     def reset(self, **kwargs: Any) -> Mapping[str, Any]:
-        return self.client.reset(**kwargs)
+        result = self.client.reset(**kwargs)
+        # A reset creates a new authoritative physical session.  Do not let
+        # an expected configuration from the previous session masquerade as
+        # the current controller state during the next monitor epoch.
+        self._last_state = {}
+        self._configuration = None
+        return result
 
     def current_time(self) -> float:
         state = self._last_state or self.client.get_state()
@@ -327,6 +333,50 @@ class SatEdgeSimBackend:
         contact = state.get("contactSlack", {}) or {}
         if not isinstance(contact, Mapping):
             contact = {"current": float(contact)}
+        prediction_uncertainty = {
+            str(k): float(v)
+            for k, v in (state.get("predictionUncertainty", {}) or {}).items()
+            if _is_number(v)
+        }
+        observed_config_id = state.get("configId", state.get("config_id"))
+        observed_config_version = state.get("configVersion", state.get("config_version"))
+        expected_config_id = self._configuration.config_id if self._configuration else None
+        expected_config_version = self._configuration.version if self._configuration else None
+        expected_config_version_int = _optional_int(expected_config_version)
+        service_rate_observed = _optional_float(
+            state.get("serviceRateObserved", state.get("service_rate_observed", state.get("serviceRateLowerBound")))
+        )
+        service_bound_certified = bool(
+            state.get("serviceBoundCertified", state.get("service_bound_certified", False))
+        )
+        service_rate_lower_bound = (
+            _optional_float(state.get("serviceRateLowerBound", state.get("service_rate_lower_bound")))
+            if service_bound_certified
+            else None
+        )
+        uncertainty_marker = _optional_bool(
+            state.get(
+                "uncertaintyEvidenceAvailable",
+                state.get("uncertainty_evidence_available", instrumentation.get("predictionUncertaintyAvailable")),
+            )
+        )
+        uncertainty_evidence_available = bool(uncertainty_marker) and bool(prediction_uncertainty)
+        uncertainty_source = state.get(
+            "uncertaintySource",
+            state.get("uncertainty_source", instrumentation.get("predictionUncertaintySource")),
+        )
+        observed_config_version_int = _optional_int(observed_config_version)
+        contact_evidence_required = state.get("contactEvidenceRequired", state.get("contact_evidence_required"))
+        configuration_truth_available = observed_config_id is not None and observed_config_version_int is not None
+        configuration_state_mismatch = bool(
+            expected_config_id is not None
+            and (
+                not configuration_truth_available
+                or str(observed_config_id) != str(expected_config_id)
+                or expected_config_version_int is None
+                or observed_config_version_int != expected_config_version_int
+            )
+        )
         acquisition = MonitorAcquisitionMetadata(
             obs_bytes=payload_bytes,
             num_queries=1,
@@ -340,22 +390,28 @@ class SatEdgeSimBackend:
         )
         return MonitorState(
             simulation_time=self._extract_time(state),
-            current_config_id=(self._configuration.config_id if self._configuration else state.get("configId")),
-            current_config_version=(self._configuration.version if self._configuration else state.get("configVersion")),
+            current_config_id=observed_config_id,
+            current_config_version=observed_config_version_int,
             configuration_age_sec=_optional_float(state.get("configurationAgeSec", state.get("configuration_age_sec"))),
             local_queue_summary={str(k): float(v) for k, v in queue.items() if _is_number(v)},
             source_queue_summary={str(k): float(v) for k, v in queue.items() if _is_number(v)},
             remaining_workload_summary={str(k): float(v) for k, v in (state.get("remainingWorkload", queue) or {}).items() if _is_number(v)},
             deadline_slack={str(k): float(v) for k, v in deadline.items() if _is_number(v)},
             local_load_summary={str(k): float(v) for k, v in (state.get("loadSummary", {}) or {}).items() if _is_number(v)},
-            service_rate_lower_bound=_optional_float(state.get("serviceRateLowerBound", state.get("service_rate_lower_bound"))),
+            service_rate_observed=service_rate_observed,
+            service_rate_lower_bound=service_rate_lower_bound,
+            service_bound_certified=service_bound_certified,
             service_horizon_sec=_optional_float(state.get("serviceHorizonSec", state.get("service_horizon_sec"))),
+            service_rate_source=state.get("serviceRateSource", state.get("service_rate_source")),
+            service_bound_semantics=state.get("serviceBoundSemantics", state.get("service_bound_semantics")),
             remaining_contact_lifetime={str(k): float(v) for k, v in (state.get("remainingContactLifetime", {}) or {}).items() if _is_number(v)},
             next_contact_summary=dict(state.get("nextContact", {}) or {}),
             contact_slack={str(k): float(v) for k, v in contact.items() if _is_number(v)},
             small_neighborhood_state=dict(state.get("smallNeighborhood", {}) or {}),
             cached_state=dict(state.get("cachedState", {}) or {}),
-            prediction_uncertainty={str(k): float(v) for k, v in (state.get("predictionUncertainty", {}) or {}).items() if _is_number(v)},
+            prediction_uncertainty=prediction_uncertainty,
+            uncertainty_evidence_available=uncertainty_evidence_available,
+            uncertainty_source=uncertainty_source,
             degradation_indicators={str(k): float(v) for k, v in (state.get("degradationIndicators", {}) or {}).items() if _is_number(v)},
             acquisition=acquisition,
             metadata={
@@ -366,8 +422,32 @@ class SatEdgeSimBackend:
                 "compatibility_preflight": source == "compatibility_preflight",
                 "payload_kind": state.get("payloadKind", "unknown"),
                 "cheap_monitor_instrumentation": dict(instrumentation),
-                "service_rate_lower_bound_available": _optional_float(state.get("serviceRateLowerBound", state.get("service_rate_lower_bound"))) is not None,
+                "authoritative_physical": bool(getattr(self.capabilities, "authoritative_physical", False)),
+                "configuration_truth_available": configuration_truth_available,
+                "configuration_state_mismatch": configuration_state_mismatch,
+                "expected_config_id": expected_config_id,
+                "expected_config_version": expected_config_version,
+                "observed_config_id": observed_config_id,
+                "observed_config_version": observed_config_version_int,
+                "service_rate_observed_available": service_rate_observed is not None,
+                "service_rate_lower_bound_available": service_rate_lower_bound is not None,
+                "service_bound_certified": service_bound_certified,
                 "service_horizon_available": _optional_float(state.get("serviceHorizonSec", state.get("service_horizon_sec"))) is not None,
+                "uncertainty_evidence_available": uncertainty_evidence_available,
+                "uncertainty_source": uncertainty_source,
+                **({"contact_evidence_required": contact_evidence_required} if contact_evidence_required is not None else {}),
+                "affected_entity_hints": {
+                    key: state[key]
+                    for key in (
+                        "affectedTaskIds",
+                        "affectedSourceIds",
+                        "affectedNodeIds",
+                        "affectedLinkIds",
+                        "affectedRouteIds",
+                        "affectedResourceKeys",
+                    )
+                    if key in state
+                },
             },
         )
 
@@ -382,6 +462,27 @@ def _is_number(value: Any) -> bool:
 
 def _optional_float(value: Any) -> float | None:
     return float(value) if _is_number(value) else None
+
+
+def _optional_int(value: Any) -> int | None:
+    if not _is_number(value):
+        return None
+    number = float(value)
+    return int(number) if number.is_integer() else None
+
+
+def _optional_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "1", "yes"}:
+            return True
+        if lowered in {"false", "0", "no"}:
+            return False
+    return None
 
 
 def _has_time(value: Mapping[str, Any]) -> bool:
