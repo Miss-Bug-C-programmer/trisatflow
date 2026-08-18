@@ -197,10 +197,10 @@ class ConservativeAnalyticalBenefitEstimator:
     ) -> OutcomeEstimate:
         start = float(monitor_state.simulation_time if forecast_start_time is None else forecast_start_time)
         horizon = max(0.0, float(evaluation_horizon))
-        workload = _sum_numeric(monitor_state.remaining_workload_summary)
-        queue = _sum_numeric(monitor_state.source_queue_summary or monitor_state.local_queue_summary)
-        rate = _service_rate(monitor_state)
-        expected_delay = workload / max(rate, 1.0e-9)
+        workload = _remaining_workload(monitor_state.remaining_workload_summary)
+        queue = _queue_workload(monitor_state.source_queue_summary or monitor_state.local_queue_summary)
+        rate, rate_source, rate_certified = _service_rate_info(monitor_state)
+        expected_delay = workload / max(rate, 1.0e-9) if rate is not None else float("inf")
         deadline_risk = _deadline_risk(monitor_state)
         config_risk = max(_max_numeric(monitor_state.degradation_indicators), _max_numeric(monitor_state.prediction_uncertainty))
         uncertainty = max(
@@ -222,7 +222,16 @@ class ConservativeAnalyticalBenefitEstimator:
             forecast_end_time=start + horizon,
             estimator_source="conservative_analytical",
             future_stochastic_truth_used=False,
-            metadata={"horizon_sec": horizon, "service_rate_lower_bound": rate, "objective_total": total},
+            metadata={
+                "horizon_sec": horizon,
+                "service_rate": rate,
+                "service_rate_source": rate_source,
+                "service_rate_certified": rate_certified,
+                "service_rate_semantics": "certified_lower_bound" if rate_certified else (
+                    "observed_not_certified" if rate_source == "service_rate_observed" else "unavailable"
+                ),
+                "objective_total": total,
+            },
         )
 
     def estimate_candidate(
@@ -333,6 +342,43 @@ def _sum_numeric(mapping: Mapping[str, Any] | None) -> float:
     return total
 
 
+def _remaining_workload(mapping: Mapping[str, Any] | None) -> float:
+    """Aggregate total workload once, preferring the backend total field."""
+
+    values = mapping or {}
+    total = values.get("total")
+    try:
+        if total is not None:
+            return max(0.0, float(total))
+    except (TypeError, ValueError):
+        pass
+    source_values = [
+        value
+        for key, value in values.items()
+        if str(key).strip().lower().startswith("source:")
+    ]
+    if source_values:
+        return max(0.0, sum(float(value) for value in source_values if _is_number(value)))
+    return max(0.0, _sum_numeric(values))
+
+
+def _queue_workload(mapping: Mapping[str, Any] | None) -> float:
+    """Use unfinished queue work, never a sum of independent counters."""
+
+    values = mapping or {}
+    for key in ("unfinishedTaskCount", "unfinished_task_count"):
+        if key in values and _is_number(values[key]):
+            return max(0.0, float(values[key]))
+    source_values = [
+        value
+        for key, value in values.items()
+        if str(key).strip().lower().startswith("source:")
+    ]
+    if source_values:
+        return max(0.0, sum(float(value) for value in source_values if _is_number(value)))
+    return 0.0
+
+
 def _max_numeric(mapping: Mapping[str, Any] | None) -> float:
     values = []
     for value in (mapping or {}).values():
@@ -354,13 +400,22 @@ def _deadline_risk(monitor_state: MonitorState) -> float:
 
 
 def _service_rate(monitor_state: MonitorState) -> float:
+    rate, _, _ = _service_rate_info(monitor_state)
+    return max(0.0, float(rate)) if rate is not None else 0.0
+
+
+def _service_rate_info(monitor_state: MonitorState) -> tuple[float | None, str, bool]:
     explicit = getattr(monitor_state, "service_rate_lower_bound", None)
-    if explicit is not None:
-        return max(0.0, float(explicit))
-    for key, value in (monitor_state.local_load_summary or {}).items():
-        if any(token in str(key).lower() for token in ("service", "capacity", "rate")):
-            try:
-                return max(0.0, float(value))
-            except (TypeError, ValueError):
-                continue
-    return max(0.0, _sum_numeric(monitor_state.local_load_summary))
+    if bool(getattr(monitor_state, "service_bound_certified", False)) and explicit is not None:
+        return max(0.0, float(explicit)), "service_rate_lower_bound", True
+    observed = getattr(monitor_state, "service_rate_observed", None)
+    if observed is not None and _is_number(observed):
+        return max(0.0, float(observed)), "service_rate_observed", False
+    return None, "unavailable", False
+
+
+def _is_number(value: Any) -> bool:
+    try:
+        return float(value) == float(value)
+    except (TypeError, ValueError):
+        return False

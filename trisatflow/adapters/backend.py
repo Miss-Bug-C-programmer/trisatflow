@@ -20,6 +20,8 @@ class BackendCapabilities:
     supports_configuration_apply: bool = False
     supports_persistent_configuration: bool = False
     supports_persistent_configuration_execution: bool = False
+    supports_persistent_native_resource_actuation: bool = False
+    supports_persistent_route_actuation: bool = False
     supports_configuration_dispatch: bool = False
     supports_physical_decision_delay: bool = False
     supports_advance_world: bool = False

@@ -16,6 +16,7 @@ def test_cheap_monitor_parser_preserves_truthful_optional_fields() -> None:
             "configId": "cfg-7",
             "configVersion": 3,
             "configurationAgeSec": 4.5,
+            "serviceRateObserved": 125000.0,
             "serviceRateLowerBound": 125000.0,
             "serviceHorizonSec": 30.0,
             "queueSummary": {"arrivedTaskCount": 2, "unfinishedTaskCount": 1},

@@ -18,6 +18,14 @@ class FeasibilityStatus(str, Enum):
     UNCERTAIN = "UNCERTAIN"
 
 
+class EvidenceApplicability(str, Enum):
+    """Whether a monitor evidence family applies and is observable."""
+
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+    AVAILABLE = "AVAILABLE"
+    UNAVAILABLE = "UNAVAILABLE"
+
+
 class PlannerFidelity(str, Enum):
     """Planner resource tiers with operational, not merely cosmetic, meaning."""
 
@@ -188,6 +196,8 @@ class MonitorState:
     service_horizon_sec: float | None = None
     service_rate_source: str | None = None
     service_bound_semantics: str | None = None
+    service_evidence_status: str | None = None
+    service_horizon_source: str | None = None
     remaining_contact_lifetime: Dict[str, float] = field(default_factory=dict)
     next_contact_summary: Dict[str, Any] = field(default_factory=dict)
     contact_slack: Dict[str, float] = field(default_factory=dict)
@@ -196,6 +206,14 @@ class MonitorState:
     prediction_uncertainty: Dict[str, float] = field(default_factory=dict)
     uncertainty_evidence_available: bool = False
     uncertainty_source: str | None = None
+    contact_evidence_status: str | None = None
+    deadline_evidence_status: str | None = None
+    uncertainty_evidence_status: str | None = None
+    compute_ready_workload_mi: float | None = None
+    executing_workload_mi: float | None = None
+    waiting_dispatch_workload_mi: float | None = None
+    network_remaining_bits: float | None = None
+    phase_state_uncertain: bool = False
     degradation_indicators: Dict[str, float] = field(default_factory=dict)
     acquisition: MonitorAcquisitionMetadata = field(default_factory=MonitorAcquisitionMetadata)
     metadata: Dict[str, Any] = field(default_factory=dict)

@@ -242,12 +242,21 @@ class EndogenousReplanningController:
         return decision
 
     def decide_intervention(self, monitor_state: MonitorState, report: ViabilityReport) -> ControlDecision:
-        if report.affected_entities.is_empty and not self.config.ablations.global_only_intervention:
+        if (
+            report.affected_entities.is_empty
+            and report.feasibility_status == FeasibilityStatus.UNCERTAIN
+            and not self.config.ablations.global_only_intervention
+        ):
             decision = ControlDecision(
                 action="KEEP",
                 monitor_state=monitor_state,
                 viability_report=report,
-                metadata={"reason": "empty_scope_is_keep", "planner_state_acquired": False},
+                metadata={
+                    "reason": "empty_scope_hold_under_uncertainty",
+                    "planner_state_acquired": False,
+                    "certified_keep": False,
+                    "hold_under_uncertainty": True,
+                },
             )
             self._record_decision(decision)
             return decision
@@ -260,7 +269,12 @@ class EndogenousReplanningController:
                 monitor_state=monitor_state,
                 viability_report=report,
                 voc=voc,
-                metadata={"reason": voc.reason, "planner_state_acquired": False},
+                metadata={
+                    "reason": voc.reason,
+                    "planner_state_acquired": False,
+                    "certified_keep": bool(report.certifies_keep),
+                    "hold_under_uncertainty": report.feasibility_status == FeasibilityStatus.UNCERTAIN,
+                },
             )
             self._record_decision(decision)
             return decision

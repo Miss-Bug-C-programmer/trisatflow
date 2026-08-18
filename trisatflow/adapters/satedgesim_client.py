@@ -201,6 +201,8 @@ class SatEdgeSimBackend:
                     supports_configuration_apply=bool(declared.get("supportsConfigurationApply", False)),
                     supports_persistent_configuration=bool(declared.get("supportsPersistentConfigurationExecution", False)),
                     supports_persistent_configuration_execution=bool(declared.get("supportsPersistentConfigurationExecution", False)),
+                    supports_persistent_native_resource_actuation=bool(declared.get("supportsPersistentNativeResourceActuation", False)),
+                    supports_persistent_route_actuation=bool(declared.get("supportsPersistentRouteActuation", False)),
                     supports_configuration_dispatch=bool(declared.get("supportsConfigurationDispatch", False)),
                     supports_physical_decision_delay=bool(declared.get("supportsPhysicalDecisionDelay", False)),
                     supports_advance_world=bool(declared.get("supportsAdvanceWorld", False)),
@@ -344,7 +346,7 @@ class SatEdgeSimBackend:
         expected_config_version = self._configuration.version if self._configuration else None
         expected_config_version_int = _optional_int(expected_config_version)
         service_rate_observed = _optional_float(
-            state.get("serviceRateObserved", state.get("service_rate_observed", state.get("serviceRateLowerBound")))
+            state.get("serviceRateObserved", state.get("service_rate_observed"))
         )
         service_bound_certified = bool(
             state.get("serviceBoundCertified", state.get("service_bound_certified", False))
@@ -367,6 +369,25 @@ class SatEdgeSimBackend:
         )
         observed_config_version_int = _optional_int(observed_config_version)
         contact_evidence_required = state.get("contactEvidenceRequired", state.get("contact_evidence_required"))
+        contact_applicability_known = _optional_bool(
+            state.get("contactApplicabilityKnown", state.get("contact_applicability_known"))
+        )
+        service_evidence_applicable = _optional_bool(
+            state.get("serviceEvidenceApplicable", state.get("service_evidence_applicable"))
+        )
+        deadline_evidence_applicable = _optional_bool(
+            state.get("deadlineEvidenceApplicable", state.get("deadline_evidence_applicable"))
+        )
+        deadline_evidence_available = _optional_bool(
+            state.get("deadlineEvidenceAvailable", state.get("deadline_evidence_available"))
+        )
+        uncertainty_evidence_applicable = _optional_bool(
+            state.get("uncertaintyEvidenceApplicable", state.get("uncertainty_evidence_applicable"))
+        )
+        service_evidence_status = state.get("serviceEvidenceStatus", state.get("service_evidence_status"))
+        contact_evidence_status = state.get("contactEvidenceStatus", state.get("contact_evidence_status"))
+        deadline_evidence_status = state.get("deadlineEvidenceStatus", state.get("deadline_evidence_status"))
+        uncertainty_evidence_status = state.get("uncertaintyEvidenceStatus", state.get("uncertainty_evidence_status"))
         configuration_truth_available = observed_config_id is not None and observed_config_version_int is not None
         configuration_state_mismatch = bool(
             expected_config_id is not None
@@ -404,6 +425,8 @@ class SatEdgeSimBackend:
             service_horizon_sec=_optional_float(state.get("serviceHorizonSec", state.get("service_horizon_sec"))),
             service_rate_source=state.get("serviceRateSource", state.get("service_rate_source")),
             service_bound_semantics=state.get("serviceBoundSemantics", state.get("service_bound_semantics")),
+            service_evidence_status=service_evidence_status,
+            service_horizon_source=state.get("serviceHorizonSource", state.get("service_horizon_source")),
             remaining_contact_lifetime={str(k): float(v) for k, v in (state.get("remainingContactLifetime", {}) or {}).items() if _is_number(v)},
             next_contact_summary=dict(state.get("nextContact", {}) or {}),
             contact_slack={str(k): float(v) for k, v in contact.items() if _is_number(v)},
@@ -412,6 +435,14 @@ class SatEdgeSimBackend:
             prediction_uncertainty=prediction_uncertainty,
             uncertainty_evidence_available=uncertainty_evidence_available,
             uncertainty_source=uncertainty_source,
+            contact_evidence_status=contact_evidence_status,
+            deadline_evidence_status=deadline_evidence_status,
+            uncertainty_evidence_status=uncertainty_evidence_status,
+            compute_ready_workload_mi=_optional_float(state.get("computeReadyWorkloadMi", state.get("compute_ready_workload_mi"))),
+            executing_workload_mi=_optional_float(state.get("executingWorkloadMi", state.get("executing_workload_mi"))),
+            waiting_dispatch_workload_mi=_optional_float(state.get("waitingDispatchWorkloadMi", state.get("waiting_dispatch_workload_mi"))),
+            network_remaining_bits=_optional_float(state.get("networkRemainingBits", state.get("network_remaining_bits"))),
+            phase_state_uncertain=bool(state.get("phaseStateUncertain", state.get("phase_state_uncertain", False))),
             degradation_indicators={str(k): float(v) for k, v in (state.get("degradationIndicators", {}) or {}).items() if _is_number(v)},
             acquisition=acquisition,
             metadata={
@@ -433,8 +464,18 @@ class SatEdgeSimBackend:
                 "service_rate_lower_bound_available": service_rate_lower_bound is not None,
                 "service_bound_certified": service_bound_certified,
                 "service_horizon_available": _optional_float(state.get("serviceHorizonSec", state.get("service_horizon_sec"))) is not None,
+                "service_evidence_applicable": service_evidence_applicable,
+                "service_evidence_status": service_evidence_status,
+                "service_horizon_source": state.get("serviceHorizonSource", state.get("service_horizon_source")),
                 "uncertainty_evidence_available": uncertainty_evidence_available,
                 "uncertainty_source": uncertainty_source,
+                "uncertainty_evidence_applicable": uncertainty_evidence_applicable,
+                "uncertainty_evidence_status": uncertainty_evidence_status,
+                "contact_applicability_known": contact_applicability_known,
+                "contact_evidence_status": contact_evidence_status,
+                "deadline_evidence_applicable": deadline_evidence_applicable,
+                "deadline_evidence_available": deadline_evidence_available,
+                "deadline_evidence_status": deadline_evidence_status,
                 **({"contact_evidence_required": contact_evidence_required} if contact_evidence_required is not None else {}),
                 "affected_entity_hints": {
                     key: state[key]

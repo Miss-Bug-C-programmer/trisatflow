@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, Protocol
 
 from trisatflow.control.scope import ReconfigurationScope, extract_typed_affected_entities
-from trisatflow.control.types import FeasibilityStatus, MonitorState
+from trisatflow.control.types import EvidenceApplicability, FeasibilityStatus, MonitorState
 
 
 @dataclass
@@ -131,16 +131,22 @@ class ConservativeViabilityEstimator:
         metadata = monitor_state.metadata or {}
         workload = self._remaining_workload(monitor_state.remaining_workload_summary)
         idle = workload <= 0.0
+        service_workload, service_applicable = self._service_workload(monitor_state, workload)
+        if not idle and isinstance(metadata.get("service_evidence_applicable"), bool):
+            service_applicable = bool(metadata["service_evidence_applicable"])
         evidence_missing: list[str] = []
 
         service_bound_certified = bool(monitor_state.service_bound_certified)
         service_rate = monitor_state.service_rate_lower_bound
-        horizon_available = monitor_state.service_horizon_sec is not None
         contact_required = self._contact_required(monitor_state, idle)
-        service_evidence_available = service_bound_certified and service_rate is not None
-        if not idle and not service_evidence_available:
+        service_status = self._service_evidence_status(
+            monitor_state, service_applicable, service_bound_certified, service_rate
+        )
+        horizon_available = monitor_state.service_horizon_sec is not None
+        service_evidence_available = service_status == EvidenceApplicability.AVAILABLE
+        if service_applicable and not service_evidence_available:
             evidence_missing.append("service_bound_unavailable")
-        if not idle and not horizon_available:
+        if service_applicable and not horizon_available:
             evidence_missing.append("service_horizon_unavailable")
 
         horizon = max(0.0, float(monitor_state.service_horizon_sec)) if horizon_available else 0.0
@@ -148,45 +154,63 @@ class ConservativeViabilityEstimator:
             contact_horizon = _summary_min(monitor_state.remaining_contact_lifetime, default=horizon) if contact_required else horizon
             effective_horizon = min(horizon, max(0.0, contact_horizon)) if contact_horizon != float("inf") else horizon
             cumulative_service = max(0.0, float(service_rate)) * effective_horizon * (1.0 - self.service_safety_fraction)
-            service_margin = cumulative_service - workload - self.feasibility_margin
+            nominal_service_margin = cumulative_service - service_workload - self.feasibility_margin
         else:
             effective_horizon = 0.0
             cumulative_service = 0.0
-            service_margin = 0.0
+            nominal_service_margin = 0.0
 
         contact_values = [float(value) for value in (monitor_state.contact_slack or {}).values() if _is_number(value)]
         contact_evidence_available = bool(contact_values)
         if contact_required:
             if contact_values:
-                contact_margin = min(contact_values) - self.uncertainty_margin
+                contact_margin = min(contact_values)
             else:
                 required = _optional_number(metadata.get("required_completion_time"))
                 lifetime = _summary_min(monitor_state.remaining_contact_lifetime, default=float("nan"))
                 if required is not None and lifetime == lifetime:
-                    contact_margin = lifetime - required - self.uncertainty_margin
+                    contact_margin = lifetime - required
                     contact_evidence_available = True
                 else:
                     contact_margin = 0.0
-                    evidence_missing.append("contact_evidence_unavailable")
+                    contact_evidence_available = False
         else:
             contact_margin = 0.0
+        contact_status = (
+            EvidenceApplicability.NOT_APPLICABLE
+            if not contact_required
+            else (EvidenceApplicability.AVAILABLE if contact_evidence_available else EvidenceApplicability.UNAVAILABLE)
+        )
+        if contact_status == EvidenceApplicability.UNAVAILABLE:
+            evidence_missing.append("contact_evidence_unavailable")
 
         deadline_values = [float(value) for value in (monitor_state.deadline_slack or {}).values() if _is_number(value)]
-        if idle:
+        deadline_applicable = self._metadata_bool(metadata, "deadline_evidence_applicable", not idle)
+        if idle or not deadline_applicable:
             deadline_margin = 0.0
+            deadline_status = EvidenceApplicability.NOT_APPLICABLE
         elif deadline_values:
             deadline_margin = min(deadline_values)
+            deadline_status = EvidenceApplicability.AVAILABLE
         else:
             deadline_margin = 0.0
+            deadline_status = EvidenceApplicability.UNAVAILABLE
+        if deadline_status == EvidenceApplicability.UNAVAILABLE:
             evidence_missing.append("deadline_evidence_unavailable")
 
         uncertainty_values = [float(value) for value in (monitor_state.prediction_uncertainty or {}).values() if _is_number(value)]
-        uncertainty_applicable = bool(metadata.get("uncertainty_evidence_applicable", not idle))
-        uncertainty_evidence_available = (
-            not uncertainty_applicable
-            or (bool(monitor_state.uncertainty_evidence_available) and bool(uncertainty_values))
+        uncertainty_applicable = self._metadata_bool(metadata, "uncertainty_evidence_applicable", not idle)
+        uncertainty_status = (
+            EvidenceApplicability.NOT_APPLICABLE
+            if not uncertainty_applicable
+            else (
+                EvidenceApplicability.AVAILABLE
+                if bool(monitor_state.uncertainty_evidence_available) and bool(uncertainty_values)
+                else EvidenceApplicability.UNAVAILABLE
+            )
         )
-        if uncertainty_applicable and not uncertainty_evidence_available:
+        uncertainty_evidence_available = uncertainty_status == EvidenceApplicability.AVAILABLE
+        if uncertainty_status == EvidenceApplicability.UNAVAILABLE:
             evidence_missing.append("uncertainty_unavailable")
         # Numeric uncertainty without an explicit evidence marker is not a
         # calibrated risk estimate.  Keep it out of the negative-margin path;
@@ -210,14 +234,23 @@ class ConservativeViabilityEstimator:
             evidence_missing.append("cheap_monitor_unverified")
 
         reasons: list[str] = []
-        if service_margin < 0.0:
+        uncertainty_penalties = self._uncertainty_penalties(
+            uncertainty_values if uncertainty_evidence_available else [],
+            tolerance=self.uncertainty_margin,
+        )
+        robust_service_margin = nominal_service_margin - uncertainty_penalties["service"]
+        robust_contact_margin = contact_margin - uncertainty_penalties["contact"]
+        robust_deadline_margin = deadline_margin - uncertainty_penalties["deadline"]
+        service_margin = robust_service_margin if service_applicable else 0.0
+        contact_margin = robust_contact_margin if contact_required else 0.0
+        deadline_margin = robust_deadline_margin if deadline_status != EvidenceApplicability.NOT_APPLICABLE else 0.0
+
+        if service_applicable and robust_service_margin < 0.0:
             reasons.append("service_margin_negative")
-        if contact_margin < 0.0:
+        if contact_required and robust_contact_margin < 0.0:
             reasons.append("contact_margin_negative")
-        if deadline_margin < 0.0:
+        if deadline_status != EvidenceApplicability.NOT_APPLICABLE and robust_deadline_margin < 0.0:
             reasons.append("deadline_margin_negative")
-        if uncertainty > self.uncertainty_margin:
-            reasons.append("uncertainty_margin_exceeded")
         reasons.extend(code for code in evidence_missing if code not in reasons)
 
         negative_margin = any(
@@ -226,7 +259,6 @@ class ConservativeViabilityEstimator:
                 "service_margin_negative",
                 "contact_margin_negative",
                 "deadline_margin_negative",
-                "uncertainty_margin_exceeded",
             )
         )
         if negative_margin:
@@ -278,11 +310,19 @@ class ConservativeViabilityEstimator:
                 "service_rate_observed": monitor_state.service_rate_observed,
                 "service_rate_source": monitor_state.service_rate_source,
                 "service_bound_semantics": monitor_state.service_bound_semantics,
-                "service_evidence_available": service_evidence_available or idle,
+                "service_evidence_applicable": service_applicable,
+                "service_evidence_status": service_status.value,
+                "service_evidence_available": service_evidence_available or not service_applicable,
                 "service_bound_certified": service_bound_certified,
-                "service_horizon_available": horizon_available or idle,
+                "service_horizon_available": horizon_available or not service_applicable,
+                "service_horizon_source": monitor_state.service_horizon_source,
                 "contact_evidence_required": contact_required,
-                "contact_evidence_available": contact_evidence_available or not contact_required,
+                "contact_evidence_status": contact_status.value,
+                "contact_evidence_available": contact_status != EvidenceApplicability.UNAVAILABLE,
+                "deadline_evidence_status": deadline_status.value,
+                "deadline_evidence_available": deadline_status != EvidenceApplicability.UNAVAILABLE,
+                "uncertainty_evidence_applicable": uncertainty_applicable,
+                "uncertainty_evidence_status": uncertainty_status.value,
                 "uncertainty_evidence_available": uncertainty_evidence_available,
                 "configuration_truth_required": config_truth_required,
                 "config_truth_consistent": config_truth_consistent,
@@ -290,6 +330,13 @@ class ConservativeViabilityEstimator:
                 "required_evidence_complete": not evidence_missing,
                 "effective_horizon_sec": effective_horizon,
                 "horizon_semantics": "certified_lower_bound_only" if service_bound_certified else "not_certified",
+                "nominal_service_margin": nominal_service_margin,
+                "robust_service_margin": robust_service_margin,
+                "robust_contact_margin": robust_contact_margin,
+                "robust_deadline_margin": robust_deadline_margin,
+                "uncertainty_penalties": uncertainty_penalties,
+                "service_workload": service_workload,
+                "phase_state_uncertain": bool(monitor_state.phase_state_uncertain),
             },
         )
 
@@ -302,16 +349,74 @@ class ConservativeViabilityEstimator:
         values = summary or {}
         if "total" in values and _is_number(values.get("total")):
             return max(0.0, float(values["total"]))
+        source_values = [
+            value
+            for key, value in values.items()
+            if str(key).strip().lower().startswith("source:")
+        ]
+        if source_values:
+            return max(0.0, sum(float(value) for value in source_values if _is_number(value)))
         return max(0.0, sum(float(value) for value in values.values() if _is_number(value)))
+
+    @staticmethod
+    def _service_workload(monitor_state: MonitorState, total_workload: float) -> tuple[float, bool]:
+        phase_values = (
+            monitor_state.compute_ready_workload_mi,
+            monitor_state.executing_workload_mi,
+            monitor_state.waiting_dispatch_workload_mi,
+            monitor_state.network_remaining_bits,
+        )
+        if not any(value is not None for value in phase_values):
+            return total_workload, total_workload > 0.0
+        compute = sum(max(0.0, float(value or 0.0)) for value in phase_values[:2])
+        waiting = max(0.0, float(monitor_state.waiting_dispatch_workload_mi or 0.0))
+        network = max(0.0, float(monitor_state.network_remaining_bits or 0.0))
+        if compute == 0.0 and waiting == 0.0 and network > 0.0:
+            return 0.0, False
+        return compute + waiting, (compute + waiting) > 0.0
+
+    @staticmethod
+    def _service_evidence_status(
+        monitor_state: MonitorState,
+        applicable: bool,
+        certified: bool,
+        rate: float | None,
+    ) -> EvidenceApplicability:
+        if not applicable:
+            return EvidenceApplicability.NOT_APPLICABLE
+        if certified and rate is not None and monitor_state.service_horizon_sec is not None:
+            return EvidenceApplicability.AVAILABLE
+        return EvidenceApplicability.UNAVAILABLE
+
+    @staticmethod
+    def _uncertainty_penalties(values: list[float], *, tolerance: float) -> dict[str, float]:
+        if not values:
+            return {"service": 0.0, "contact": 0.0, "deadline": 0.0}
+        tolerance = max(0.0, float(tolerance))
+        generic = max(0.0, max(values) - tolerance)
+        return {"service": generic, "contact": generic, "deadline": generic}
+
+    @staticmethod
+    def _metadata_bool(metadata: Mapping[str, Any], key: str, default: bool) -> bool:
+        value = metadata.get(key)
+        return bool(value) if isinstance(value, bool) else bool(default)
 
     @staticmethod
     def _contact_required(monitor_state: MonitorState, idle: bool) -> bool:
         if idle:
             return False
         metadata = monitor_state.metadata or {}
+        contact_status = str(getattr(monitor_state, "contact_evidence_status", "") or "").upper()
+        if contact_status == EvidenceApplicability.NOT_APPLICABLE.value:
+            return False
+        if contact_status == EvidenceApplicability.UNAVAILABLE.value:
+            return True
         for key in ("contact_evidence_required", "contactEvidenceRequired"):
             if key in metadata:
-                return bool(metadata[key])
+                if metadata.get("contact_applicability_known") is False:
+                    return True
+                if isinstance(metadata[key], bool):
+                    return bool(metadata[key])
         if bool(metadata.get("execution_is_local", False)) or bool(metadata.get("contact_not_applicable", False)):
             return False
         return bool(
