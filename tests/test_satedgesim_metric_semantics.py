@@ -50,8 +50,8 @@ def test_energy_sources_are_not_conflated() -> None:
     summary = run_smoke()
     case_c = summary["cases"][2]["summary"]
 
-    assert case_c["energy_source"] == "simlog_final"
-    assert case_c["energy_unit"] == "simulator_counter"
+    assert case_c["energy_source"] == "simlog_final_wh"
+    assert case_c["energy_unit"] == "Wh"
     assert case_c["final_cumulative_energy"] == 12.5
     assert case_c["receipt_energy_delta"] == 0.25
     assert "final_task_energy" not in case_c
