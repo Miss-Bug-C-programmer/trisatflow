@@ -88,14 +88,25 @@ class DecisionDelayModel:
             delay.physical_delay_enforced = False
             delay.metadata["physical_receipt_status"] = "not_requested"
             return delay
-        if supported and hasattr(backend, "advance_world"):
+        control_epoch = bool(
+            getattr(capabilities, "supports_control_monitor_epoch", False)
+            and hasattr(backend, "advance_control_epoch")
+        )
+        advance_method = "advance_control_epoch" if control_epoch else "advance_world"
+        if supported and hasattr(backend, advance_method):
             before = None
             if hasattr(backend, "current_time"):
                 try:
                     before = float(backend.current_time())
                 except Exception:  # noqa: BLE001
                     before = None
-            receipt = backend.advance_world(delay.total_delay_sec)
+            receipt = getattr(backend, advance_method)(delay.total_delay_sec)
+            delay.metadata["physical_progression_path"] = advance_method
+            delay.metadata["control_monitor_epoch"] = control_epoch
+            if isinstance(receipt, Mapping):
+                delay.metadata["control_epoch_paused_for_activation"] = bool(
+                    receipt.get("pausedForConfigurationActivation", False)
+                )
             after = None
             if hasattr(backend, "current_time"):
                 try:
@@ -122,11 +133,14 @@ class DecisionDelayModel:
                     verified = receipt_delta + self.receipt_tolerance_sec >= delay.requested_delta_sec
                 else:
                     verified = bool(isinstance(receipt, Mapping) and receipt.get("accepted", receipt.get("physicalDelayEnforced", False)))
+            if isinstance(receipt, Mapping) and "accepted" in receipt and not bool(receipt.get("accepted")):
+                verified = False
+                delay.metadata["physical_receipt_rejected"] = receipt.get("reason", "backend_rejected")
             delay.physical_receipt_verified = verified
             delay.physical_delay_enforced = verified
             delay.metadata["physical_receipt_status"] = "verified" if verified else "unverified"
             if not verified and self.require_physical_enforcement:
-                raise RuntimeError("Backend advance_world returned no verifiable physical time advancement")
+                raise RuntimeError("Backend physical delay path returned no verifiable physical time advancement")
             return delay
         delay.physical_delay_enforced = False
         if self.require_physical_enforcement:

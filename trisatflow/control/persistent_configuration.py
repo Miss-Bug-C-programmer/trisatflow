@@ -216,6 +216,11 @@ class PersistentConfiguration:
         task_id = str(context.get("task_id", context.get("taskId", "")))
         if task_id in self.assignments:
             return deepcopy(self.assignments[task_id])
+        source_id = context.get("source_id", context.get("sourceId"))
+        if source_id is not None and str(source_id) in self.assignments:
+            return deepcopy(self.assignments[str(source_id)])
+        if source_id is not None and f"source:{source_id}" in self.assignments:
+            return deepcopy(self.assignments[f"source:{source_id}"])
         # Explicit task overrides remain the strongest binding.
         best_rule: Any = None
         best_score = -1

@@ -404,6 +404,18 @@ class EndogenousReplanningController:
         projected = self._project_configuration(self.current_configuration, result.configuration, scope)
         validation = self.revalidator.revalidate(self.backend, projected, planned_at=planned_at, applied_at=applied_at)
         if not validation.accepted:
+            if delay.metadata.get("control_epoch_paused_for_activation"):
+                resume = getattr(self.backend, "resume_control_epoch", None)
+                if not callable(resume):
+                    raise RuntimeError(
+                        "Control epoch ended with a paused physical backend, but no resume_control_epoch path exists"
+                    )
+                resume_receipt = resume()
+                if isinstance(resume_receipt, Mapping) and not bool(resume_receipt.get("accepted", False)):
+                    raise RuntimeError(
+                        "Physical backend failed to resume the old configuration after stale-plan rejection"
+                    )
+                delay.metadata["control_epoch_resume_receipt"] = resume_receipt
             self.metrics.stale_plan_rejection += 1
             result.metadata["post_delay_validation"] = validation.metadata or {"reason_codes": validation.reason_codes}
             return result, delay, projected, False

@@ -40,7 +40,16 @@ class SatEdgeSimBackend:
         return result
 
     def current_time(self) -> float:
-        state = self._last_state or self.client.get_state()
+        if self._last_state:
+            state = self._last_state
+        elif self.capabilities.supports_monitor_state:
+            # A task-level get_state payload can legitimately omit the
+            # simulation clock once no decision is pending.  The cheap
+            # monitor remains the authoritative, low-cost physical clock
+            # observation for delay verification.
+            state = self.client._request("GET", "/get_monitor_state")
+        else:
+            state = self.client.get_state()
         return self._extract_time(state)
 
     def get_monitor_state(self, context: Any | None = None) -> MonitorState:
@@ -158,6 +167,30 @@ class SatEdgeSimBackend:
         self._last_state = {}
         return result
 
+    def advance_control_epoch(self, delta_sec: float) -> Mapping[str, Any]:
+        if not self.capabilities.supports_control_monitor_epoch:
+            raise SatEdgeSimCapabilityError(
+                "SatEdgeSim does not expose a control-monitoring epoch endpoint"
+            )
+        result = self.client._request(
+            "POST", "/control/epoch/advance", json={"deltaSec": float(delta_sec)}
+        )
+        self._last_state = {}
+        if not isinstance(result, Mapping):
+            raise SatEdgeSimCapabilityError("control epoch advance returned a non-structured receipt")
+        return result
+
+    def resume_control_epoch(self) -> Mapping[str, Any]:
+        if not self.capabilities.supports_control_epoch_resume:
+            raise SatEdgeSimCapabilityError(
+                "SatEdgeSim does not expose control-epoch resume"
+            )
+        result = self.client._request("POST", "/control/epoch/resume", json={})
+        self._last_state = {}
+        if not isinstance(result, Mapping):
+            raise SatEdgeSimCapabilityError("control epoch resume returned a non-structured receipt")
+        return result
+
     def validate_configuration(self, configuration: PersistentConfiguration) -> Mapping[str, Any]:
         if not self.capabilities.supports_configuration_validation:
             raise SatEdgeSimCapabilityError(
@@ -206,6 +239,8 @@ class SatEdgeSimBackend:
                     supports_configuration_dispatch=bool(declared.get("supportsConfigurationDispatch", False)),
                     supports_physical_decision_delay=bool(declared.get("supportsPhysicalDecisionDelay", False)),
                     supports_advance_world=bool(declared.get("supportsAdvanceWorld", False)),
+                    supports_control_monitor_epoch=bool(declared.get("supportsControlMonitoringEpoch", False)),
+                    supports_control_epoch_resume=bool(declared.get("supportsControlEpochResume", False)),
                     supports_configuration_validation=bool(declared.get("supportsConfigurationValidation", False)),
                     supports_mid_transfer_contact_enforcement=bool(declared.get("supportsMidTransferContactEnforcement", False)),
                     supports_verified_delay_receipt=False,
@@ -251,6 +286,8 @@ class SatEdgeSimBackend:
             supports_configuration_dispatch=endpoints["/configuration/dispatch"],
             supports_physical_decision_delay=endpoints["/advance_world"],
             supports_advance_world=endpoints["/advance_world"],
+            supports_control_monitor_epoch=False,
+            supports_control_epoch_resume=False,
             supports_scope_aware_planner_state=False,
             supports_configuration_validation=endpoints["/configuration/validate"],
             # Endpoint discovery is not proof that the server returns a

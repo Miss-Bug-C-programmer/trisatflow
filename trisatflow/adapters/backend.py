@@ -25,6 +25,8 @@ class BackendCapabilities:
     supports_configuration_dispatch: bool = False
     supports_physical_decision_delay: bool = False
     supports_advance_world: bool = False
+    supports_control_monitor_epoch: bool = False
+    supports_control_epoch_resume: bool = False
     supports_scope_aware_planner_state: bool = False
     supports_budget_aware_planner_state: bool = False
     supports_configuration_validation: bool = False
@@ -78,6 +80,12 @@ class PhysicalBackend(Protocol):
         ...
 
     def advance_world(self, delta_sec: float) -> Any:
+        ...
+
+    def advance_control_epoch(self, delta_sec: float) -> Any:
+        ...
+
+    def resume_control_epoch(self) -> Any:
         ...
 
     def current_time(self) -> float:
