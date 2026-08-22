@@ -5,8 +5,89 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Protocol
 
-from trisatflow.control.scope import ReconfigurationScope, extract_typed_affected_entities
+from trisatflow.control.scope import ReconfigurationScope, ViolationProvenance, extract_typed_affected_entities
 from trisatflow.control.types import EvidenceApplicability, FeasibilityStatus, MonitorState
+
+
+@dataclass
+class SoftPerformanceRisk:
+    """Non-certifying performance signal used for optional intervention."""
+
+    score: float = 0.0
+    components: dict[str, float] = field(default_factory=dict)
+    trigger_reason: str = "KEEP_SAFE"
+    evidence_provenance: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "score": float(self.score),
+            "components": dict(self.components),
+            "trigger_reason": self.trigger_reason,
+            "evidence_provenance": dict(self.evidence_provenance),
+        }
+
+
+@dataclass
+class ViabilityCertificate:
+    """Conservative, unit-aware certificate for continuing a configuration."""
+
+    service_lower_bound: float | None = None
+    remaining_work: float | None = None
+    service_margin: float | None = None
+    deadline_slack_lower_bound: float | None = None
+    deadline_margin: float | None = None
+    contact_slack_lower_bound: float | None = None
+    contact_margin: float | None = None
+    queue_margin: float | None = None
+    resource_margin: float | None = None
+    uncertainty_bound: float | None = None
+    confidence: float = 0.0
+    certified_safe: bool = False
+    certificate_failure_reasons: list[str] = field(default_factory=list)
+    constraint_provenance: list[ViolationProvenance] = field(default_factory=list)
+    backend_evidence_provenance: dict[str, Any] = field(default_factory=dict)
+    monitor_epoch: int | None = None
+    sim_time: float = 0.0
+    configuration_id: str | None = None
+    configuration_version: int | None = None
+    evidence_complete: bool = False
+    units: dict[str, str] = field(default_factory=lambda: {
+        "service_lower_bound": "MI",
+        "remaining_work": "MI",
+        "service_margin": "normalized",
+        "deadline_slack_lower_bound": "sec",
+        "deadline_margin": "normalized",
+        "contact_slack_lower_bound": "sec",
+        "contact_margin": "normalized",
+        "uncertainty_bound": "backend_defined",
+    })
+    semantics: dict[str, str] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "service_lower_bound": self.service_lower_bound,
+            "remaining_work": self.remaining_work,
+            "service_margin": self.service_margin,
+            "deadline_slack_lower_bound": self.deadline_slack_lower_bound,
+            "deadline_margin": self.deadline_margin,
+            "contact_slack_lower_bound": self.contact_slack_lower_bound,
+            "contact_margin": self.contact_margin,
+            "queue_margin": self.queue_margin,
+            "resource_margin": self.resource_margin,
+            "uncertainty_bound": self.uncertainty_bound,
+            "confidence": self.confidence,
+            "certified_safe": self.certified_safe,
+            "certificate_failure_reasons": list(self.certificate_failure_reasons),
+            "constraint_provenance": [item.to_dict() for item in self.constraint_provenance],
+            "backend_evidence_provenance": dict(self.backend_evidence_provenance),
+            "monitor_epoch": self.monitor_epoch,
+            "sim_time": self.sim_time,
+            "configuration_id": self.configuration_id,
+            "configuration_version": self.configuration_version,
+            "evidence_complete": self.evidence_complete,
+            "units": dict(self.units),
+            "semantics": dict(self.semantics),
+        }
 
 
 @dataclass
@@ -26,6 +107,10 @@ class ViabilityReport:
     needs_intervention: bool = False
     confidence: float = 0.0
     evaluated_at: float = 0.0
+    certificate: ViabilityCertificate | None = None
+    soft_risk: SoftPerformanceRisk | None = None
+    trigger_reason: str = "KEEP_SAFE"
+    constraint_provenance: list[ViolationProvenance] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -35,9 +120,10 @@ class ViabilityReport:
     @property
     def certifies_keep(self) -> bool:
         """Cheap certification only; final intervention remains VoC's job."""
-
+        certificate_safe = self.certificate.certified_safe if self.certificate is not None else False
         return (
-            self.feasibility_status == FeasibilityStatus.VIABLE
+            certificate_safe
+            and self.feasibility_status == FeasibilityStatus.VIABLE
             and not self.needs_intervention
             and self.confidence > 0.0
             and bool(self.metadata.get("required_evidence_complete", False))
@@ -52,6 +138,18 @@ class ViabilityReport:
     @property
     def viability_status(self) -> str:
         return self.feasibility_status.value
+
+    @property
+    def certificate_safe(self) -> bool:
+        return bool(self.certificate and self.certificate.certified_safe)
+
+    @property
+    def soft_risk_score(self) -> float:
+        return float(self.soft_risk.score if self.soft_risk else self.performance_risk)
+
+    @property
+    def certificate_failure_reasons(self) -> list[str]:
+        return list(self.certificate.certificate_failure_reasons if self.certificate else [])
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -70,6 +168,12 @@ class ViabilityReport:
             "needs_intervention": self.needs_intervention,
             "confidence": self.confidence,
             "evaluated_at": self.evaluated_at,
+            "certificate_safe": self.certificate_safe,
+            "soft_risk_score": self.soft_risk_score,
+            "trigger_reason": self.trigger_reason,
+            "certificate": self.certificate.to_dict() if self.certificate else None,
+            "soft_risk": self.soft_risk.to_dict() if self.soft_risk else None,
+            "constraint_provenance": [item.to_dict() for item in self.constraint_provenance],
             "metadata": dict(self.metadata),
         }
 
@@ -110,6 +214,8 @@ class ConservativeViabilityEstimator:
         performance_risk_threshold: float = 0.5,
         contact_predictability: bool = True,
         use_performance_viability: bool = True,
+        soft_performance_intervention_enabled: bool = True,
+        soft_risk_weights: Mapping[str, float] | None = None,
         evaluation_horizon_sec: float = 10.0,
         service_safety_fraction: float = 0.1,
     ) -> None:
@@ -118,6 +224,16 @@ class ConservativeViabilityEstimator:
         self.performance_risk_threshold = float(performance_risk_threshold)
         self.contact_predictability = bool(contact_predictability)
         self.use_performance_viability = bool(use_performance_viability)
+        self.soft_performance_intervention_enabled = bool(soft_performance_intervention_enabled)
+        self.soft_risk_weights = {
+            "performance_degradation": 1.0,
+            "queue_load_trend": 1.0,
+            "deadline_trend": 1.0,
+            "contact_deterioration": 1.0,
+            "uncertainty": 1.0,
+            "volatility": 1.0,
+            **{str(key): float(value) for key, value in (soft_risk_weights or {}).items()},
+        }
         self.evaluation_horizon_sec = max(0.0, float(evaluation_horizon_sec))
         self.service_safety_fraction = max(0.0, min(1.0, float(service_safety_fraction)))
 
@@ -234,6 +350,8 @@ class ConservativeViabilityEstimator:
             evidence_missing.append("cheap_monitor_unverified")
 
         reasons: list[str] = []
+        nominal_contact_slack_lower_bound = contact_margin
+        nominal_deadline_slack_lower_bound = deadline_margin
         uncertainty_penalties = self._uncertainty_penalties(
             uncertainty_values if uncertainty_evidence_available else [],
             tolerance=self.uncertainty_margin,
@@ -272,19 +390,124 @@ class ConservativeViabilityEstimator:
         else:
             feasibility = FeasibilityStatus.VIABLE
 
-        # Performance viability is deliberately conservative and based on
-        # current/cached degradation, never future stochastic truth.
-        performance_risk = max(0.0, min(1.0, max(degradation, load)))
-        performance_worth_replanning = self.use_performance_viability and performance_risk > self.performance_risk_threshold
+        # The certificate and soft risk are separate contracts.  The former
+        # is conservative and unit-aware; the latter is an optional trigger
+        # for performance-oriented reconfiguration.
+        deadline_trend = _bounded_risk(metadata.get("deadline_trend"))
+        contact_deterioration = _bounded_risk(metadata.get("contact_deterioration"))
+        volatility = _bounded_risk(metadata.get("volatility"))
+        uncertainty_risk = (
+            _bounded_risk(uncertainty)
+            if uncertainty_evidence_available
+            else (1.0 if uncertainty_status == EvidenceApplicability.UNAVAILABLE else 0.0)
+        )
+        risk_components = {
+            "performance_degradation": max(0.0, min(1.0, degradation)),
+            "queue_load_trend": max(0.0, min(1.0, load)),
+            "deadline_trend": deadline_trend,
+            "contact_deterioration": contact_deterioration,
+            "uncertainty": uncertainty_risk,
+            "volatility": volatility,
+        }
+        active_weights = {
+            key: max(0.0, float(self.soft_risk_weights.get(key, 0.0)))
+            for key, value in risk_components.items()
+            if value is not None
+        }
+        weight_total = sum(active_weights.values())
+        weighted_risk = max(
+            0.0,
+            min(1.0, sum(risk_components[key] * active_weights.get(key, 0.0) for key in risk_components) / weight_total),
+        ) if weight_total else 0.0
+        performance_signal = max(risk_components.get("performance_degradation", 0.0), risk_components.get("queue_load_trend", 0.0), deadline_trend, contact_deterioration, volatility)
+        performance_risk = max(weighted_risk, performance_signal)
+        performance_worth_replanning = (
+            self.use_performance_viability
+            and self.soft_performance_intervention_enabled
+            and performance_risk > self.performance_risk_threshold
+        )
         if performance_worth_replanning:
             reasons.append("performance_risk_threshold_exceeded")
 
+        certificate_failure_reasons: list[str] = []
+        if service_applicable and robust_service_margin < 0.0:
+            certificate_failure_reasons.append("SERVICE_DEFICIT")
+        if contact_required and robust_contact_margin < 0.0:
+            certificate_failure_reasons.append("CONTACT_DEFICIT")
+        if deadline_status != EvidenceApplicability.NOT_APPLICABLE and robust_deadline_margin < 0.0:
+            certificate_failure_reasons.append("DEADLINE_DEFICIT")
+        if evidence_missing:
+            certificate_failure_reasons.append("UNKNOWN")
+        if not self.contact_predictability and contact_required:
+            certificate_failure_reasons.append("UNKNOWN")
+        certificate_failure_reasons = list(dict.fromkeys(certificate_failure_reasons))
+        affected = self._affected_entities(monitor_state, current_config, reasons)
+        provenance = self._build_provenance(
+            affected,
+            certificate_failure_reasons,
+            reasons,
+            monitor_state,
+            evidence_missing,
+        )
+        denominator = max(abs(service_workload), 1.0e-9)
+        certificate = ViabilityCertificate(
+            service_lower_bound=(cumulative_service if service_applicable and service_evidence_available else None),
+            remaining_work=(service_workload if service_applicable else None),
+            service_margin=(robust_service_margin / denominator if service_applicable else None),
+            deadline_slack_lower_bound=(nominal_deadline_slack_lower_bound if deadline_status != EvidenceApplicability.NOT_APPLICABLE and deadline_status != EvidenceApplicability.UNAVAILABLE else None),
+            deadline_margin=(robust_deadline_margin / max(self.evaluation_horizon_sec, horizon, 1.0e-9) if deadline_status != EvidenceApplicability.NOT_APPLICABLE else None),
+            contact_slack_lower_bound=(nominal_contact_slack_lower_bound if contact_required and contact_status == EvidenceApplicability.AVAILABLE else None),
+            contact_margin=(robust_contact_margin / max(self.evaluation_horizon_sec, horizon, 1.0e-9) if contact_required else None),
+            queue_margin=_optional_number(metadata.get("queue_margin")),
+            resource_margin=_optional_number(metadata.get("resource_margin")),
+            uncertainty_bound=(uncertainty if uncertainty_evidence_available else None),
+            confidence=0.9 if monitor_state.acquisition.is_true_cheap_monitor else 0.0,
+            certified_safe=(feasibility == FeasibilityStatus.VIABLE and not evidence_missing and config_truth_consistent and monitor_state.acquisition.is_true_cheap_monitor),
+            certificate_failure_reasons=certificate_failure_reasons,
+            constraint_provenance=provenance,
+            backend_evidence_provenance={
+                "backend_source": metadata.get("backend_source", "unknown"),
+                "monitor_source": metadata.get("monitor_source", monitor_state.acquisition.source),
+                "service_rate_source": monitor_state.service_rate_source,
+                "service_bound_semantics": monitor_state.service_bound_semantics,
+                "uncertainty_source": monitor_state.uncertainty_source,
+                "evidence_missing": list(evidence_missing),
+            },
+            monitor_epoch=_optional_int(metadata.get("monitor_epoch")),
+            sim_time=float(monitor_state.simulation_time),
+            configuration_id=getattr(current_config, "config_id", None),
+            configuration_version=getattr(current_config, "version", None),
+            evidence_complete=not evidence_missing,
+            semantics={
+                "service_lower_bound": "certified_conservative_MI_over_service_horizon",
+                "deadline_slack_lower_bound": "minimum_observed_deadline_slack_sec",
+                "contact_slack_lower_bound": "minimum_observed_contact_slack_sec",
+                "uncertainty_bound": "maximum_calibrated_backend_uncertainty_only",
+            },
+        )
+        soft_trigger = (
+            "CERTIFICATE_FAILURE" if certificate_failure_reasons and any(reason != "UNKNOWN" for reason in certificate_failure_reasons)
+            else "UNCERTAINTY" if "UNKNOWN" in certificate_failure_reasons
+            else "PERFORMANCE_DEGRADATION" if performance_worth_replanning
+            else "KEEP_SAFE"
+        )
+        soft_risk = SoftPerformanceRisk(
+            score=performance_risk,
+            components=risk_components,
+            trigger_reason=soft_trigger,
+            evidence_provenance={
+                "degradation_source": "monitor.degradation_indicators",
+                "load_source": "monitor.local_load_summary",
+                "uncertainty_source": monitor_state.uncertainty_source,
+                "future_stochastic_truth_used": False,
+            },
+        )
+        trigger_reason = soft_trigger
         needs_intervention = feasibility != FeasibilityStatus.VIABLE or performance_worth_replanning
         confidence = 0.9 if monitor_state.acquisition.is_true_cheap_monitor else 0.0
         if feasibility == FeasibilityStatus.UNCERTAIN:
             confidence = min(confidence, 0.5)
 
-        affected = self._affected_entities(monitor_state, current_config, reasons)
         return ViabilityReport(
             feasibility_status=feasibility,
             performance_risk=performance_risk,
@@ -297,6 +520,10 @@ class ConservativeViabilityEstimator:
             needs_intervention=needs_intervention,
             confidence=confidence,
             evaluated_at=float(monitor_state.simulation_time),
+            certificate=certificate,
+            soft_risk=soft_risk,
+            trigger_reason=trigger_reason,
+            constraint_provenance=provenance,
             uncertainty_components=dict(monitor_state.prediction_uncertainty),
             horizon_sec=horizon,
             cumulative_service_lower_bound=cumulative_service,
@@ -337,12 +564,53 @@ class ConservativeViabilityEstimator:
                 "uncertainty_penalties": uncertainty_penalties,
                 "service_workload": service_workload,
                 "phase_state_uncertain": bool(monitor_state.phase_state_uncertain),
+                "certificate_failure_reasons": list(certificate_failure_reasons),
+                "certificate_safe": certificate.certified_safe,
+                "soft_risk_score": performance_risk,
+                "soft_risk_components": dict(risk_components),
+                "soft_risk_trigger_reason": trigger_reason,
+                "constraint_provenance": [item.to_dict() for item in provenance],
+                "service_units": {"rate": "MI/sec", "workload": "MI", "lower_bound": "MI"},
             },
         )
 
     @staticmethod
     def _affected_entities(monitor_state: MonitorState, current_config: Any, reasons: list[str]) -> ReconfigurationScope:
         return extract_typed_affected_entities(monitor_state, current_config)
+
+    @staticmethod
+    def _build_provenance(
+        affected: ReconfigurationScope,
+        certificate_failure_reasons: list[str],
+        reasons: list[str],
+        monitor_state: MonitorState,
+        evidence_missing: list[str],
+    ) -> list[ViolationProvenance]:
+        result: list[ViolationProvenance] = []
+        typed = {
+            "SERVICE_DEFICIT": ("service", "service margin or certified service evidence"),
+            "DEADLINE_DEFICIT": ("deadline", "deadline slack lower bound"),
+            "CONTACT_DEFICIT": ("contact", "contact slack lower bound"),
+            "QUEUE_OVERLOAD": ("queue", "queue/load summary"),
+            "RESOURCE_CONTENTION": ("resource", "resource margin"),
+            "UNCERTAINTY": ("uncertainty", "calibrated uncertainty evidence"),
+            "UNKNOWN": ("unknown", "mandatory monitor evidence"),
+        }
+        for failure in certificate_failure_reasons:
+            token, evidence_name = typed.get(failure, ("unknown", "certificate evidence"))
+            matching = [reason for reason in reasons if token in reason.lower() or failure.lower() in reason.lower()]
+            result.append(ViolationProvenance(
+                violation_type=failure,
+                **affected.affected_entities(),
+                reason=";".join(sorted(set(matching))) or failure,
+                evidence={
+                    "evidence_name": evidence_name,
+                    "missing": list(evidence_missing),
+                    "simulation_time": float(monitor_state.simulation_time),
+                },
+                source="monitor_viability_certificate",
+            ))
+        return result
 
     @staticmethod
     def _remaining_workload(summary: Mapping[str, Any] | None) -> float:
@@ -457,3 +725,15 @@ def _is_number(value: Any) -> bool:
 
 def _optional_number(value: Any) -> float | None:
     return float(value) if _is_number(value) else None
+
+
+def _optional_int(value: Any) -> int | None:
+    number = _optional_number(value)
+    return int(number) if number is not None and number.is_integer() else None
+
+
+def _bounded_risk(value: Any) -> float:
+    number = _optional_number(value)
+    if number is None:
+        return 0.0
+    return max(0.0, min(1.0, number))

@@ -27,6 +27,8 @@ class ViabilityConfig:
     contact_predictability: bool = True
     evaluation_horizon_sec: float = 10.0
     service_safety_fraction: float = 0.1
+    soft_performance_intervention_enabled: bool = True
+    soft_risk_weights: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -34,6 +36,9 @@ class ScopeConfig:
     max_candidate_scopes: int = 4
     max_scope_entities: int | None = None
     include_global_candidate: bool = True
+    preserve_resume_recompute: dict[str, bool] = field(
+        default_factory=lambda: {"preserve": True, "resume": True, "recompute": False}
+    )
 
 
 @dataclass
@@ -121,6 +126,7 @@ class AblationConfig:
 @dataclass
 class ControllerConfig:
     mode: str = "endogenous_replanning"
+    strict_publication_mode: bool = False
     monitor: MonitorConfig = field(default_factory=MonitorConfig)
     viability: ViabilityConfig = field(default_factory=ViabilityConfig)
     benefit: BenefitConfig = field(default_factory=BenefitConfig)

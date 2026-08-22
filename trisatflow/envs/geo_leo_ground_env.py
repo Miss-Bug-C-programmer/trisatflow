@@ -185,6 +185,9 @@ class GeoLeoGroundEnv:
         *,
         minimal_info: bool = False,
     ) -> StepOutput:
+        if bool(getattr(self.cfg, "formal_claim_required", False)) and not self._physical_enabled():
+            raise RuntimeError("formal/paper-ready experiments require scenario.physical.enabled=true")
+
         upper_action = upper_action.to(self.device).long().view(self.cfg.n_leo)
         lower_action = lower_action.to(self.device).float().view(self.cfg.n_leo, self.LOWER_ACTION_DIM)
         lower_action = lower_action.clamp(0.0, 1.0)
@@ -740,6 +743,7 @@ class GeoLeoGroundEnv:
                 "configured_mask_false_positive_rate": torch.full_like(delay, float(compact_mask_details.mask_false_positive_rate)),
                 "configured_mask_false_negative_rate": torch.full_like(delay, float(compact_mask_details.mask_false_negative_rate)),
             }
+            info["simulator_semantics"] = ("physical_dimensioned" if self._physical_enabled() else "legacy_normalized_debug")  # type: ignore[assignment]
             info["mask_source"] = compact_mask_details.mask_source  # type: ignore[assignment]
             info["lyapunov_semantics"] = "reward_shaping_no_stability_theorem"  # type: ignore[assignment]
             info["lyapunov_claim_mode"] = str(getattr(self.cfg, "lyapunov_claim_mode", "inspired_reward"))  # type: ignore[assignment]
@@ -755,7 +759,9 @@ class GeoLeoGroundEnv:
                 )
             diagnostic_oracle_allowed = bool(getattr(self.cfg, "diagnostic_oracle_allowed", False))
             info["diagnostic_oracle_allowed"] = diagnostic_oracle_allowed  # type: ignore[assignment]
-            info["formal_claim_allowed"] = bool(not compact_mask_details.uses_oracle_trace_mask and not diagnostic_oracle_allowed)  # type: ignore[assignment]
+            info["formal_claim_allowed"] = bool(
+                self._physical_enabled() and not compact_mask_details.uses_oracle_trace_mask and not diagnostic_oracle_allowed
+            )  # type: ignore[assignment]
             info["mask_predictor_units"] = self._mask_predictor_units_for_step(self.t - 1)  # type: ignore[assignment]
             return StepOutput(obs, edge_index_next, edge_attr_next, upper_reward, lower_reward, done, info)
 
@@ -930,10 +936,13 @@ class GeoLeoGroundEnv:
         info["lyapunov_claim_mode"] = str(getattr(self.cfg, "lyapunov_claim_mode", "inspired_reward"))  # type: ignore[assignment]
         info["queue_cap_mode"] = queue_cap_mode  # type: ignore[assignment]
         info["mask_source"] = old_mask_details.mask_source  # type: ignore[assignment]
+        info["simulator_semantics"] = ("physical_dimensioned" if self._physical_enabled() else "legacy_normalized_debug")  # type: ignore[assignment]
         diagnostic_oracle_allowed = bool(getattr(self.cfg, "diagnostic_oracle_allowed", False))
         uses_oracle_trace_mask = bool(old_mask_details.uses_oracle_trace_mask)
         info["diagnostic_oracle_allowed"] = diagnostic_oracle_allowed  # type: ignore[assignment]
-        info["formal_claim_allowed"] = bool(not uses_oracle_trace_mask and not diagnostic_oracle_allowed)  # type: ignore[assignment]
+        info["formal_claim_allowed"] = bool(
+            self._physical_enabled() and not uses_oracle_trace_mask and not diagnostic_oracle_allowed
+        )  # type: ignore[assignment]
         info["mask_predictor_units"] = self._mask_predictor_units_for_step(self.t - 1)  # type: ignore[assignment]
         return StepOutput(obs, edge_index_next, edge_attr_next, upper_reward, lower_reward, done, info)
 

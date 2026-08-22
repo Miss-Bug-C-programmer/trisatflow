@@ -33,15 +33,23 @@ def _dummy_candidate_info():
 
 def test_baseline_metadata_schema_complete():
     required_keys = {
+        "baseline_name",
         "name",
         "type",
+        "implemented",
         "uses_oracle",
         "uses_privileged_info",
         "trainable",
+        "requires_checkpoint",
+        "checkpoint_loaded",
         "paper_ready",
+        "is_placeholder",
+        "allows_formal_eval",
+        "fallback_policy",
+        "update_implemented",
     }
     for name, meta in baseline_metadata_json().items():
-        assert set(meta.keys()) == required_keys
+        assert required_keys <= set(meta.keys())
         assert meta["name"] == name
 
 

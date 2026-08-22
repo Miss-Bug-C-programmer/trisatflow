@@ -167,9 +167,14 @@ def validate_train_config(cfg: Any, *, source: str = "") -> None:
     nonformal_diagnostic_config = any(
         part in src_text for part in ("/stress/", "/debug/", "configs/stress/", "configs/debug/", "configs/small.yaml")
     )
-    reward_mode_explicit = bool(getattr(cfg, "_reward_mode_explicit", False))
     formal_or_paper_path = bool(is_formal_or_paper_config(cfg, source)) if "is_formal_or_paper_config" in globals() else False
-    if (reward_mode_explicit or formal_or_paper_path) and source and source != "<default>" and reward_mode == "physical_weighted" and not physical_enabled and not nonformal_diagnostic_config:
+    physical_config_explicit = bool(getattr(cfg, "_physical_config_explicit", False))
+    # A physical reward is authoritative for formal/paper-ready runs and for
+    # configs that explicitly declare a disabled physical model.  Do not
+    # reject arbitrary compatibility/inheritance configs solely because they
+    # name the physical reward while omitting the physical block altogether;
+    # those configs remain non-formal until they opt into the formal gate.
+    if (formal_or_paper_path or physical_config_explicit) and source and source != "<default>" and reward_mode == "physical_weighted" and not physical_enabled and not nonformal_diagnostic_config:
         errors.append("physical_weighted reward requires scenario.physical.enabled=true")
     if paper_ready and not physical_enabled:
         errors.append("paper-ready/formal config requires scenario.physical.enabled=true")

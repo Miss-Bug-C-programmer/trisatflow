@@ -90,7 +90,7 @@ def build_upper_action_mask(
     enable_completion_safe_mask: bool,
     enable_mobility_risk_mask: bool,
     local_action_index: int = 0,
-    mask_source: str = "predicted",
+    mask_source: str | None = None,
     predicted_completion_safe_mask: torch.Tensor | None = None,
     predicted_mobility_safe_mask: torch.Tensor | None = None,
     predictor_fallback: torch.Tensor | None = None,
@@ -116,7 +116,12 @@ def build_upper_action_mask(
     completion = visibility.clone()
     mobility = completion.clone()
     fallback_due_missing_field = torch.zeros(vis.shape[0], dtype=torch.float32, device=vis.device)
-    source = str(mask_source or "predicted").strip().lower()
+    # A directly supplied trace snapshot is an observed/measured source when
+    # the caller does not select a source explicitly.  The environment always
+    # passes its configured source, so this inference only preserves the
+    # low-level API's natural trace semantics and never turns a configured
+    # predicted policy into oracle-mask consumption.
+    source = str(mask_source or ("measured" if trace_snapshot is not None else "predicted")).strip().lower()
     if source not in {"measured", "predicted", "oracle_trace"}:
         source = "predicted"
     uses_oracle_trace = source == "oracle_trace"
@@ -159,7 +164,7 @@ def build_upper_action_mask(
 
     if apply_visibility:
         vis_source = vis
-        if source == "oracle_trace" and trace_snapshot is not None:
+        if source in {"measured", "oracle_trace"} and trace_snapshot is not None:
             provided = trace_snapshot.provided.bool().view(-1, 1)
             vis_trace = trace_snapshot.abstract_action_mask_visible.bool()
             visible_present = _trace_mask_field_present(trace_snapshot, 0, vis).view(-1, 1)
@@ -171,7 +176,7 @@ def build_upper_action_mask(
 
     if apply_completion:
         completion_source = visibility.clone()
-        if source == "oracle_trace" and trace_snapshot is not None:
+        if source in {"measured", "oracle_trace"} and trace_snapshot is not None:
             provided = trace_snapshot.provided.bool().view(-1, 1)
             completion_trace = trace_snapshot.abstract_action_mask_completion_safe.bool()
             completion_present = _trace_mask_field_present(trace_snapshot, 1, vis).view(-1, 1)
@@ -185,7 +190,7 @@ def build_upper_action_mask(
 
     if apply_mobility:
         mobility_source = completion.clone()
-        if source == "oracle_trace" and trace_snapshot is not None:
+        if source in {"measured", "oracle_trace"} and trace_snapshot is not None:
             provided = trace_snapshot.provided.bool().view(-1, 1)
             mobility_trace = trace_snapshot.abstract_action_mask_mobility_safe.bool()
             mobility_present = _trace_mask_field_present(trace_snapshot, 2, vis).view(-1, 1)

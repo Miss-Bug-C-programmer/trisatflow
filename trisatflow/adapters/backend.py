@@ -18,6 +18,8 @@ class BackendCapabilities:
     supports_contact_plan: bool = False
     supports_topology_snapshot: bool = False
     supports_configuration_apply: bool = False
+    supports_configuration_patch: bool = False
+    supports_scope_aware_configuration_patch: bool = False
     supports_persistent_configuration: bool = False
     supports_persistent_configuration_execution: bool = False
     supports_persistent_native_resource_actuation: bool = False
@@ -74,6 +76,15 @@ class PhysicalBackend(Protocol):
         ...
 
     def apply_configuration(self, configuration: Any) -> Any:
+        ...
+
+    def apply_configuration_patch(
+        self,
+        current_configuration: Any,
+        proposed_configuration: Any,
+        modification_scope: Any,
+        **kwargs: Any,
+    ) -> Any:
         ...
 
     def dispatch_under_configuration(self, configuration: Any, task: Any | None = None) -> Any:

@@ -107,6 +107,24 @@ def config() -> PersistentConfiguration:
     )
 
 
+def test_destination_only_candidates_install_a_reusable_default_rule() -> None:
+    planner = GreedyPlanner(source_name="satedgesim")
+    current = PersistentConfiguration(config_id="cfg", version=0)
+    state = PlannerState(
+        simulation_time=0.0,
+        candidate_vms=[
+            {"datacenterDeviceId": 7, "vmIndex": 7, "estimatedTotalDelaySec": 0.01, "isFeasible": False},
+            {"datacenterDeviceId": 8, "vmIndex": 8, "estimatedTotalDelaySec": 0.20, "isFeasible": True},
+            {"datacenterDeviceId": 9, "vmIndex": 9, "estimatedTotalDelaySec": 0.05, "isFeasible": True},
+        ],
+    )
+    result = planner.plan(state, current, ReconfigurationScope(node_ids={"7", "8", "9"}), PlanningBudget())
+
+    assert set(result.configuration.assignments) == {"default"}
+    assert set(result.configuration.reusable_rules) == {"default"}
+    assert result.configuration.materialize_execution_rule({"task_id": "future", "source_id": "new-source"})["vmIndex"] == 9
+
+
 def test_persistent_configuration_survives_physical_slots_and_keep_does_not_plan():
     backend = FakeBackend()
     controller = EndogenousReplanningController(backend, config={"planner": {"enabled_backends": []}})

@@ -104,8 +104,17 @@ class DecisionDelayModel:
             delay.metadata["physical_progression_path"] = advance_method
             delay.metadata["control_monitor_epoch"] = control_epoch
             if isinstance(receipt, Mapping):
+                # Keep the backend's native progression receipt attached to
+                # the decision.  A boolean ``physical_delay_enforced`` is not
+                # sufficient evidence for publication claims: the outcome
+                # path must be able to inspect the before/after simulation
+                # state reported by /advance_world.
+                delay.metadata["physical_advance_receipt"] = dict(receipt)
                 delay.metadata["control_epoch_paused_for_activation"] = bool(
                     receipt.get("pausedForConfigurationActivation", False)
+                )
+                delay.metadata["physical_state_changed"] = bool(
+                    receipt.get("physicalStateChanged", receipt.get("physical_state_changed", False))
                 )
             after = None
             if hasattr(backend, "current_time"):
@@ -161,19 +170,57 @@ class RevalidationResult:
 class PostDelayRevalidator:
     """Backend-mediated stale-plan check; no future oracle is inferred here."""
 
-    def revalidate(self, backend: Any, configuration: Any, *, planned_at: float, applied_at: float) -> RevalidationResult:
+    def revalidate(
+        self,
+        backend: Any,
+        configuration: Any,
+        *,
+        planned_at: float,
+        applied_at: float,
+        current_configuration: Any | None = None,
+        scope: Any | None = None,
+        observed_world_version: int | None = None,
+        observed_control_epoch: int | None = None,
+        planning_delay: Mapping[str, Any] | None = None,
+        intervention_id: str | None = None,
+    ) -> RevalidationResult:
         if hasattr(backend, "validate_configuration"):
-            raw = backend.validate_configuration(configuration)
+            try:
+                raw = backend.validate_configuration(
+                    configuration,
+                    current_configuration=current_configuration,
+                    scope=scope,
+                    observed_world_version=observed_world_version,
+                    observed_control_epoch=observed_control_epoch,
+                    planning_delay=planning_delay,
+                    intervention_id=intervention_id,
+                )
+            except TypeError:
+                # Compatibility adapters keep the old one-argument contract;
+                # they do not participate in the authoritative patch token.
+                raw = backend.validate_configuration(configuration)
             if isinstance(raw, RevalidationResult):
                 return raw
             if isinstance(raw, Mapping):
                 raw_reasons = raw.get("reason_codes", raw.get("reasonCodes", []))
                 if isinstance(raw_reasons, str):
                     raw_reasons = [raw_reasons]
+                metadata = dict(raw.get("metadata", raw.get("details", {})) or {})
+                # The v2 server keeps these fields at response top level.  Do
+                # not drop them when translating into the canonical Python
+                # revalidation result; the apply request needs the exact
+                # world version that was validated after physical delay.
+                for key in (
+                    "worldVersion", "world_version", "configurationVersion",
+                    "configurationVersionBefore", "resultingConfigurationVersion",
+                    "simulationTimeSec", "decisionStatus", "staleBaseRejected",
+                ):
+                    if key in raw:
+                        metadata[key] = raw[key]
                 return RevalidationResult(
                     accepted=bool(raw.get("accepted", raw.get("valid", False))),
                     reason_codes=[str(v) for v in raw_reasons],
-                    metadata=dict(raw.get("metadata", raw.get("details", {})) or {}),
+                    metadata=metadata,
                 )
             return RevalidationResult(accepted=bool(raw))
 

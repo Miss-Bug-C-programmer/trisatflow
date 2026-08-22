@@ -16,6 +16,8 @@ class PlannerCandidate:
     fidelity: PlannerFidelity
     budget: PlanningBudget
     planner_name: str
+    observation_scope: Any | None = None
+    modification_scope: Any | None = None
     estimated_improvement: float = 0.0
     estimated_hold_cost: float = 0.0
     estimated_candidate_cost: DecisionCostBreakdown = field(default_factory=DecisionCostBreakdown)

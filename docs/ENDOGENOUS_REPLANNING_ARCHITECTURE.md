@@ -23,11 +23,11 @@ decision plane which decides whether and when the inner planner should run.
 | Three clocks | `control.ClockState` | Physical time/slot, monitor epoch, intervention epoch |
 | Cheap monitor | `control.MonitorState`, backend `get_monitor_state` | Queue/workload/deadline/load summaries and cached/predictable contact only |
 | Heavy escalation state | `control.PlannerState`, backend `get_planner_state` | Candidate VMs, detailed resources, graph and planner observation |
-| Feasibility + performance viability | `control.ViabilityReport`, `ConservativeViabilityEstimator` | Separate constraint feasibility from current performance risk |
-| Generic selective subset Ω | `control.ReconfigurationScope`, `ScopeGenerator` | Task/source/node/link/route/resource subsets; empty Ω is KEEP |
+| Robust viability + soft performance risk | `control.ViabilityCertificate`, `SoftPerformanceRisk`, `ViabilityReport` | Unit-aware conservative certificate is separate from optional performance trigger |
+| Generic selective subset Ω | `control.ReconfigurationScope`, `ViolationProvenance`, `ScopeGenerator` | Provenance-driven task/source/node/link/route/resource sets; empty Ω is KEEP |
 | Planner adapter | `planners.PlannerBackend` | Common interface for greedy and hierarchical MARL backends |
 | Fidelity f and budget b | `PlannerFidelity`, `PlanningBudget`, `PlannerSpec` | Candidate limits change acquisition/compute passed to the backend |
-| Decision resource accounting | `DecisionCostBreakdown` | C_obs, C_sync, C_solve, C_signal and C_recfg are independent |
+| Decision resource accounting | `DecisionCostBreakdown` | Estimated and realized reconfiguration costs remain distinct from C_obs/C_sync/C_solve/C_signal |
 | Delay contract | `DecisionDelayBreakdown`, `DecisionDelayModel` | Separates wall-clock measurement from simulated physical delay |
 | Value of computation | `PlannerCandidate`, `VoC`, `PlannerArbitrator` | Can reject an expensive high-fidelity candidate |
 | Post-delay validity | `PostDelayRevalidator` | Reject/fallback on stale target/contact/deadline/resource bindings |
@@ -71,18 +71,23 @@ intervention. Configuration lifetime is therefore measured as
 
 ### Contribution 2: viability and selective Ω
 
-`ConservativeViabilityEstimator` uses current/cached summaries and deterministic
-contact information supplied by the backend. It never consumes future
+`ConservativeViabilityEstimator` emits a `ViabilityCertificate` from unit-aware
+lower bounds (MI for service, seconds for deadline/contact) and mandatory
+evidence. Missing evidence is not replaced by a favorable value. A separate
+`SoftPerformanceRisk` retains degradation/load/trend/uncertainty/volatility
+signals and can be disabled explicitly. Neither layer consumes future
 stochastic task arrivals, queue realizations, channel realizations or reward.
-`ScopeGenerator` builds subsets from affected entities and dependency metadata.
+`ScopeGenerator` builds subsets from `ViolationProvenance` and typed dependency
+metadata, preserving the reason each entity entered the candidate.
 The reporting buckets `small`, `medium` and `global` are derived from subset
 volume only; they are not the theoretical action definition.
 
-`EndogenousReplanningController._project_configuration` freezes entries outside
-Ω even when a legacy planner returns a full-world action. The planner result
-records `scope_execution_restricted=True` and, when relevant,
-`scope_computation_restricted=False`; no unsupported compute reduction is
-claimed.
+`EndogenousReplanningController` keeps observation scope and modification scope
+explicit. `_project_configuration` freezes entries outside Ω, and the planner
+delta is checked before application so an out-of-scope change cannot be
+silently widened. SatEdgeSim publication execution uses the versioned
+`/configuration/patch` executor; non-authoritative legacy apply is explicitly
+labelled compatibility-only.
 
 ### Contribution 3: resource-aware planner arbitration
 

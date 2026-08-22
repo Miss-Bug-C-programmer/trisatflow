@@ -78,13 +78,14 @@ class GreedyPlanner:
         if budget.max_iterations is not None and int(budget.max_iterations) <= 0:
             candidates = []
         chosen_by_source: dict[str, Mapping[str, Any]] = {}
+        default_candidate: Mapping[str, Any] | None = None
+        default_score = float("inf")
         for candidate in candidates:
             if budget.time_budget_ms is not None and (time.perf_counter() - started) * 1000.0 > float(budget.time_budget_ms):
                 break
             if not isinstance(candidate, Mapping):
                 continue
             explicit_source = candidate.get("sourceId", candidate.get("source_id"))
-            selector_key = "source_id" if explicit_source is not None else "node_id"
             source = str(
                 candidate.get(
                     "sourceId",
@@ -98,6 +99,22 @@ class GreedyPlanner:
                 score = float(candidate.get(self.score_key, candidate.get("score", 0.0)))
             except (TypeError, ValueError):
                 score = 0.0
+            if explicit_source is None:
+                # SatEdgeSim candidate records describe destination VMs and
+                # do not identify a source-specific rule.  Treating
+                # datacenterDeviceId as a source creates a rule that the
+                # native dispatcher cannot materialize for a future task.
+                # A source-agnostic candidate is therefore represented by
+                # the canonical default execution rule.  Do not select an
+                # explicitly infeasible default merely because its estimate
+                # is numerically smaller.
+                target_node = str(candidate.get("datacenterDeviceId", candidate.get("nodeId", "")))
+                allowed = scope.is_empty or scope.contains(target_node, "node")
+                feasible = candidate.get("isFeasible", candidate.get("feasible"))
+                if allowed and feasible is not False and score < default_score:
+                    default_candidate = candidate
+                    default_score = score
+                continue
             previous = chosen_by_source.get(source)
             if previous is None or score < float(previous.get(self.score_key, previous.get("score", 0.0)) or 0.0):
                 chosen_by_source[source] = candidate
@@ -117,6 +134,15 @@ class GreedyPlanner:
                 }
                 if "resourceAllocation" in candidate:
                     resources[source] = deepcopy(candidate["resourceAllocation"])
+
+        if default_candidate is not None:
+            default_assignment = deepcopy(dict(default_candidate))
+            assignments["default"] = default_assignment
+            reusable_rules["default"] = {
+                "selector": {},
+                "assignment": deepcopy(default_assignment),
+                "provenance": "greedy_planner_default_candidate",
+            }
 
         next_config = current_config.clone(
             config_id=f"{getattr(current_config, 'config_id', 'config')}.v{int(getattr(current_config, 'version', 0)) + 1}",

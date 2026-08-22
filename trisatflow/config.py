@@ -149,6 +149,10 @@ class ScenarioConfig:
     physical: PhysicalModelConfig = field(default_factory=PhysicalModelConfig)
     paper_ready: bool = False
     diagnostic_oracle_allowed: bool = False
+    # Explicit execution-semantic guard used by formal callers.  Legacy
+    # normalized simulation remains available for debug/backward-compatible
+    # runs, but cannot be presented as a formal physical result.
+    formal_claim_required: bool = False
 
 
 @dataclass
@@ -415,9 +419,11 @@ def load_config(path: str | Path | None = None) -> TrainConfig:
     data = _normalize_config_aliases(data)
     reward_mode_explicit = isinstance(data.get("reward"), dict) and "mode" in data.get("reward", {})
     data = _canonicalize_physical_config_sources(data)
+    physical_config_explicit = isinstance(data.get("scenario"), dict) and "physical" in data.get("scenario", {})
     data["config_source_chain"] = source_chain
     cfg = _from_dict(TrainConfig, data)
     setattr(cfg, "_reward_mode_explicit", bool(reward_mode_explicit))
+    setattr(cfg, "_physical_config_explicit", bool(physical_config_explicit))
     cfg.physical = cfg.scenario.physical
     cfg.scenario.paper_ready = bool(getattr(cfg.experiment, "paper_ready", False))
     cfg.scenario.diagnostic_oracle_allowed = bool(getattr(cfg.experiment, "diagnostic_oracle_allowed", False))

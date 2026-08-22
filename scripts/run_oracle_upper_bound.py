@@ -405,6 +405,9 @@ def main() -> None:
         "upper_algo": "oracle",
         "lower_algo": "oracle",
         "observation_ablation": "",
+        # Canonical aggregation field.  Keep final_mean_system_cost below as
+        # a backward-compatible export for existing oracle consumers.
+        "final_normalized_system_cost": float(oracle_cost),
         "final_mean_system_cost": float(oracle_cost),
         "final_mean_delay": float(oracle_delay),
         "final_mean_energy": float(oracle_energy),

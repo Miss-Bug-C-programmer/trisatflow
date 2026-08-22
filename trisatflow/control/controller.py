@@ -38,6 +38,8 @@ class ControlDecision:
     monitor_state: MonitorState | None = None
     viability_report: ViabilityReport | None = None
     scope: ReconfigurationScope = field(default_factory=ReconfigurationScope)
+    observation_scope: ReconfigurationScope = field(default_factory=ReconfigurationScope)
+    modification_scope: ReconfigurationScope = field(default_factory=ReconfigurationScope)
     planner_name: str = ""
     planner_fidelity: str = ""
     planning_budget: dict[str, Any] = field(default_factory=dict)
@@ -88,6 +90,8 @@ class EndogenousReplanningController:
             contact_predictability=not self.config.ablations.no_contact_predictability and self.config.viability.contact_predictability,
             evaluation_horizon_sec=self.config.viability.evaluation_horizon_sec,
             service_safety_fraction=self.config.viability.service_safety_fraction,
+            soft_performance_intervention_enabled=self.config.viability.soft_performance_intervention_enabled,
+            soft_risk_weights=self.config.viability.soft_risk_weights,
         )
         self.performance_profile = PlannerPerformanceProfile()
         self.benefit_estimator = ConservativeAnalyticalBenefitEstimator(
@@ -136,6 +140,7 @@ class EndogenousReplanningController:
         self._last_intervention_time = 0.0
         self._initialised = False
         self._planner_descriptors: dict[str, PlanningDescriptor] = {}
+        self._intervention_sequence = 0
 
     def record_realized_planner_outcome(self, decision: ControlDecision, realized_benefit: float) -> dict[str, Any]:
         """Feed back an observed outcome; never call this with future truth."""
@@ -204,6 +209,9 @@ class EndogenousReplanningController:
         self.clock.mark_monitor()
         self._update_context()
         monitor = self._acquire_monitor_state()
+        intervention_id = self._new_intervention_id()
+        monitor.metadata["intervention_id"] = intervention_id
+        monitor.metadata["observed_control_epoch"] = self.clock.monitor_epoch
         direct_state_change = self.config.ablations.state_change_trigger and bool((monitor.metadata or {}).get("state_changed", False))
         if direct_state_change:
             # A2 is intentionally a trigger-only ablation: it bypasses the
@@ -220,6 +228,18 @@ class EndogenousReplanningController:
             )
         else:
             report = self.viability.evaluate(monitor, self.current_configuration)
+        report.metadata.setdefault("intervention_id", intervention_id)
+        report.metadata.setdefault("observed_control_epoch", self.clock.monitor_epoch)
+        report.metadata.setdefault("observed_world_version", monitor.metadata.get("world_version"))
+        if self.config.strict_publication_mode and (
+            report.certificate is None
+            or not report.certificate.evidence_complete
+            or not report.certificate.certified_safe and report.feasibility_status == FeasibilityStatus.VIABLE
+        ):
+            raise RuntimeError(
+                "Strict publication mode requires a complete robust viability certificate; "
+                f"reasons={report.certificate_failure_reasons or report.reason_codes}"
+            )
         self._last_monitor = monitor
         self._last_viability = report
 
@@ -260,6 +280,20 @@ class EndogenousReplanningController:
             )
             self._record_decision(decision)
             return decision
+        if report.certifies_keep and not report.needs_intervention:
+            decision = ControlDecision(
+                action="KEEP",
+                monitor_state=monitor_state,
+                viability_report=report,
+                metadata={
+                    "reason": "certificate_safe_keep",
+                    "planner_state_acquired": False,
+                    "certified_keep": True,
+                    "hold_under_uncertainty": False,
+                },
+            )
+            self._record_decision(decision)
+            return decision
         _, candidates = self.select_scope_planner_budget(monitor_state, report)
         hold_cost = self._hold_cost(report)
         voc = self.arbitrator.choose(candidates, hold_cost=hold_cost)
@@ -282,19 +316,25 @@ class EndogenousReplanningController:
         selected = voc.selected
         assert selected is not None
         backend = self.planners.get(selected.planner_name)
-        planner_state = self._acquire_selected_planner_state(backend, monitor_state, selected.scope, selected.budget)
+        observation_scope = selected.observation_scope or selected.scope
+        modification_scope = selected.modification_scope or selected.scope
+        planner_state = self._acquire_selected_planner_state(backend, monitor_state, observation_scope, selected.budget)
         result, delay, projected, accepted = self.execute_intervention(
             planner_state,
             backend,
-            selected.scope,
+            modification_scope,
             selected.budget,
             report=report,
+            monitor_state=monitor_state,
+            intervention_id=str((monitor_state.metadata or {}).get("intervention_id", "")) or None,
         )
         decision = ControlDecision(
             action="INTERVENE" if accepted else "KEEP",
             monitor_state=monitor_state,
             viability_report=report,
             scope=selected.scope,
+            observation_scope=observation_scope,
+            modification_scope=modification_scope,
             planner_name=selected.planner_name,
             planner_fidelity=getattr(getattr(selected, "fidelity", None), "value", selected.fidelity),
             planning_budget=selected.budget.to_dict(),
@@ -302,7 +342,13 @@ class EndogenousReplanningController:
             planner_result=result,
             delay=delay,
             stale_plan_rejection=not accepted,
-            metadata={"projected_configuration": projected.to_dict() if projected else None, "planner_state_acquired": True},
+            metadata={
+                "projected_configuration": projected.to_dict() if projected else None,
+                "planner_state_acquired": True,
+                "observation_scope": observation_scope.to_dict(),
+                "modification_scope": modification_scope.to_dict(),
+                "intervention_id": (monitor_state.metadata or {}).get("intervention_id"),
+            },
         )
         self._record_decision(decision)
         return decision
@@ -316,9 +362,13 @@ class EndogenousReplanningController:
             scopes = [global_scope] if not global_scope.is_empty else scopes
         if self.config.ablations.fixed_intervention_scope is not None:
             scopes = [self.config.ablations.fixed_intervention_scope]
-        if not scopes:
-            global_scope = self.scope_generator._global_scope(self.current_configuration, None)
-            scopes = [global_scope] if not global_scope.is_empty else []
+
+        intervention_id = str((monitor_state.metadata or {}).get("intervention_id", "")) or None
+        for candidate_scope in scopes:
+            if intervention_id is not None:
+                candidate_scope.metadata.setdefault("intervention_id", intervention_id)
+            candidate_scope.metadata.setdefault("observed_control_epoch", (monitor_state.metadata or {}).get("monitor_epoch"))
+            candidate_scope.metadata.setdefault("observed_world_version", (monitor_state.metadata or {}).get("world_version"))
 
         candidates: list[PlannerCandidate] = []
         hold_cost = self._hold_cost(report)
@@ -355,6 +405,8 @@ class EndogenousReplanningController:
                 candidates.append(
                     PlannerCandidate(
                         scope=scope,
+                        observation_scope=scope,
+                        modification_scope=scope,
                         fidelity=fidelity,
                         budget=budget,
                         planner_name=str(getattr(backend, "name", "unknown")),
@@ -383,9 +435,17 @@ class EndogenousReplanningController:
         budget: Any,
         *,
         report: ViabilityReport | None = None,
+        monitor_state: MonitorState | None = None,
+        intervention_id: str | None = None,
     ) -> tuple[PlannerResult | None, DecisionDelayBreakdown, PersistentConfiguration | None, bool]:
         previous_configuration = self.current_configuration
         result = backend.plan(planner_state, self.current_configuration, scope, budget)
+        intervention_id = intervention_id or str((getattr(planner_state, "metadata", {}) or {}).get("intervention_id", "")) or None
+        if intervention_id is None:
+            intervention_id = self._new_intervention_id()
+        result.metadata["intervention_id"] = intervention_id
+        result.metadata["observed_control_epoch"] = (monitor_state.metadata or {}).get("monitor_epoch") if monitor_state else None
+        result.metadata["observed_world_version"] = (monitor_state.metadata or {}).get("world_version") if monitor_state else None
         result.metadata["planner_state_bytes"] = int(getattr(getattr(planner_state, "acquisition", None), "obs_bytes", 0))
         cost = result.decision_cost if isinstance(result.decision_cost, DecisionCostBreakdown) else DecisionCostBreakdown()
         self._price_cost(cost)
@@ -401,8 +461,25 @@ class EndogenousReplanningController:
         self.context.physical_delay_enforced = bool(delay.physical_delay_enforced)
         self._sync_clock()
         applied_at = self.clock.physical_time_sec
+        self._assert_modification_scope(self.current_configuration, result.configuration, scope)
         projected = self._project_configuration(self.current_configuration, result.configuration, scope)
-        validation = self.revalidator.revalidate(self.backend, projected, planned_at=planned_at, applied_at=applied_at)
+        validation = self.revalidator.revalidate(
+            self.backend,
+            projected,
+            planned_at=planned_at,
+            applied_at=applied_at,
+            current_configuration=previous_configuration,
+            scope=scope,
+            observed_world_version=_optional_int((monitor_state.metadata or {}).get("world_version")) if monitor_state else None,
+            observed_control_epoch=_optional_int((monitor_state.metadata or {}).get("monitor_epoch")) if monitor_state else None,
+            planning_delay=delay.to_dict(),
+            intervention_id=intervention_id,
+        )
+        result.metadata["post_delay_validation"] = {
+            "accepted": validation.accepted,
+            "reason_codes": list(validation.reason_codes),
+            **dict(validation.metadata or {}),
+        }
         if not validation.accepted:
             if delay.metadata.get("control_epoch_paused_for_activation"):
                 resume = getattr(self.backend, "resume_control_epoch", None)
@@ -434,7 +511,17 @@ class EndogenousReplanningController:
         projected.applied_at_sim_time = applied_at
         projected.last_validated_at_sim_time = applied_at
         projected.scope_from_previous = scope
-        receipt = self._apply_backend_configuration(projected)
+        receipt = self._apply_backend_configuration(
+            projected,
+            modification_scope=scope,
+            observation_scope=scope,
+            intervention_id=result.metadata.get("intervention_id"),
+            observed_world_version=_optional_int((monitor_state.metadata or {}).get("world_version")) if monitor_state else None,
+            observed_control_epoch=_optional_int((monitor_state.metadata or {}).get("monitor_epoch")) if monitor_state else None,
+            revalidated_world_version=_optional_int(validation.metadata.get("worldVersion", validation.metadata.get("world_version"))),
+            planning_delay=delay.to_dict(),
+            acquisition_metadata=getattr(getattr(planner_state, "acquisition", None), "to_dict", lambda: {})(),
+        )
         self._merge_apply_receipt_cost(cost, receipt, diff_summary)
         result.decision_cost = cost
         result.metadata.update(
@@ -445,14 +532,23 @@ class EndogenousReplanningController:
                 "physical_delay": delay.to_dict(),
             }
         )
+        if isinstance(receipt, Mapping) and not bool(receipt.get("accepted", True)):
+            # A patch rejection is an explicit physical outcome.  It must be
+            # retained in the decision trace without mutating the active
+            # configuration or relabeling the rejection as KEEP success.
+            result.metadata["patch_rejected"] = True
+            return result, delay, projected, False
         projected.metadata.update(
             {
                 "configuration_diff": diff_summary.get("diff", {}),
                 "configuration_change_counts": diff_summary,
                 "apply_receipt": receipt,
+                "observation_scope": getattr(planner_state, "metadata", {}).get("scope_requested", {}) if isinstance(getattr(planner_state, "metadata", {}), Mapping) else {},
+                "modification_scope": scope.to_dict(),
+                "preserve_resume_recompute": dict(scope.metadata.get("preserve_resume_recompute", self.config.scope.preserve_resume_recompute)),
             }
         )
-        self.current_configuration = projected
+        self.current_configuration = self._configuration_from_receipt(projected, receipt)
         self._last_intervention_time = applied_at
         if previous_configuration is not None:
             self.metrics.add_lifetime(max(0.0, applied_at - float(previous_configuration.applied_at_sim_time)))
@@ -535,6 +631,8 @@ class EndogenousReplanningController:
         if self.config.monitor.true_cheap_required and not monitor.acquisition.is_true_cheap_monitor:
             if self.config.monitor.fallback_mode == "error":
                 raise RuntimeError("Configured true_cheap_required but backend returned a compatibility monitor")
+        monitor.metadata.setdefault("monitor_epoch", self.clock.monitor_epoch)
+        monitor.metadata.setdefault("control_epoch", self.clock.monitor_epoch)
         self._sync_clock(monitor.simulation_time)
         return monitor
 
@@ -556,6 +654,10 @@ class EndogenousReplanningController:
                 metadata={"initial_plan": True, "configuration_changed": True},
             )
         )
+
+    def _new_intervention_id(self) -> str:
+        self._intervention_sequence += 1
+        return f"{self.context.run_id or 'trisatflow'}-m{self.clock.monitor_epoch}-i{self._intervention_sequence}"
 
     def _record_decision(self, decision: ControlDecision) -> None:
         self.metrics.record(
@@ -582,9 +684,13 @@ class EndogenousReplanningController:
         config = self.current_configuration
         cost = planner_result.decision_cost if planner_result is not None and isinstance(planner_result.decision_cost, DecisionCostBreakdown) else DecisionCostBreakdown()
         measured_reconfiguration = (cost.metadata or {}).get("reconfiguration_receipt_status") == "verified"
-        realized_reconfiguration_volume = cost.actual_migration_volume if measured_reconfiguration else cost.migration_volume
-        realized_reconfiguration_bytes = cost.actual_reconfiguration_bytes if measured_reconfiguration else cost.reconfiguration_bytes
+        realized_reconfiguration_volume = cost.actual_migration_volume if measured_reconfiguration else None
+        realized_reconfiguration_bytes = cost.actual_reconfiguration_bytes if measured_reconfiguration else None
         scope = decision.scope if decision else ReconfigurationScope()
+        intervention_id = (decision.metadata or {}).get("intervention_id") if decision else None
+        if intervention_id is None and monitor is not None:
+            intervention_id = (getattr(monitor, "metadata", {}) or {}).get("intervention_id")
+        delay_metadata = decision.delay.metadata if decision and decision.delay is not None else {}
         payload = {
             "control_action": action,
             "physical_time_sec": self.clock.physical_time_sec,
@@ -602,6 +708,12 @@ class EndogenousReplanningController:
             "deadline_margin": report.deadline_margin if report else 0.0,
             "uncertainty_margin": report.uncertainty_margin if report else 0.0,
             "viability_reason": ";".join(report.reason_codes) if report else "",
+            "certificate_safe": bool(report.certificate_safe) if report else False,
+            "certificate_failure_reasons": report.certificate_failure_reasons if report else [],
+            "viability_certificate": report.certificate.to_dict() if report and report.certificate else None,
+            "soft_risk": report.soft_risk.to_dict() if report and report.soft_risk else None,
+            "constraint_provenance": [item.to_dict() for item in report.constraint_provenance] if report else [],
+            "trigger_reason": report.trigger_reason if report else "UNKNOWN",
             "intervention_required": bool(report.needs_intervention) if report else False,
             "scope_cardinality": scope.cardinality,
             "scope_normalized_volume": scope.normalized_volume(),
@@ -621,7 +733,6 @@ class EndogenousReplanningController:
             "solve_cost": cost.solve_cost,
             "signal_cost": cost.signal_cost,
             "decision_cost": cost.decision_cost,
-            "reconfiguration_cost": cost.reconfiguration_cost,
             "total_intervention_cost": cost.intervention_cost,
             "decision_energy": float(cost.observation_energy + cost.sync_energy + cost.solver_energy_proxy + cost.signal_energy),
             "decision_compute": float(cost.solver_compute_proxy),
@@ -631,14 +742,23 @@ class EndogenousReplanningController:
             "monitor_is_true_cheap": bool(monitor.acquisition.is_true_cheap_monitor) if monitor else False,
             "monitor_bytes": int(monitor.acquisition.obs_bytes) if monitor else 0,
             "planner_state_bytes": int((getattr(planner_result, "metadata", {}) or {}).get("planner_state_bytes", 0)) if planner_result else 0,
-            "control_plane_bytes": int(cost.observation_bytes + cost.sync_bytes + cost.signal_bytes + realized_reconfiguration_bytes),
-            "reconfiguration_volume": float(realized_reconfiguration_volume),
+            "control_plane_bytes": int(cost.observation_bytes + cost.sync_bytes + cost.signal_bytes + (realized_reconfiguration_bytes or 0)),
+            "reconfiguration_cost": cost.reconfiguration_cost,
+            "estimated_reconfiguration_cost": cost.estimated_reconfiguration_cost,
+            "realized_reconfiguration_cost": cost.realized_reconfiguration_cost,
+            "reconfiguration_volume": float(cost.migration_volume),
+            "estimated_reconfiguration_volume": float(cost.migration_volume),
+            "realized_reconfiguration_volume": float(realized_reconfiguration_volume) if realized_reconfiguration_volume is not None else None,
             "predicted_reconfiguration_volume": float(cost.migration_volume),
-            "actual_reconfiguration_volume": float(cost.actual_migration_volume) if measured_reconfiguration else None,
-            "actual_reconfiguration_bytes": int(realized_reconfiguration_bytes),
+            "actual_reconfiguration_volume": float(cost.actual_migration_volume) if measured_reconfiguration and cost.actual_migration_volume is not None else None,
+            "estimated_reconfiguration_bytes": int(cost.reconfiguration_bytes),
+            "realized_reconfiguration_bytes": int(realized_reconfiguration_bytes) if realized_reconfiguration_bytes is not None else None,
+            "actual_reconfiguration_bytes": int(realized_reconfiguration_bytes) if realized_reconfiguration_bytes is not None else None,
             "configuration_diff": (getattr(planner_result, "metadata", {}) or {}).get("configuration_diff", {}),
             "configuration_change_counts": (getattr(planner_result, "metadata", {}) or {}).get("configuration_change_counts", {}),
             "reconfiguration_discrepancy": (cost.metadata or {}).get("reconfiguration_discrepancy", {}),
+            "realized_reconfiguration_evidence": (cost.metadata or {}).get("realized_reconfiguration_evidence"),
+            "scope_metadata": scope.metadata,
             "physical_time_normalization_sec": max(self.clock.physical_time_sec, 1.0e-9),
             "num_dispatches": self.metrics.num_dispatches,
             "num_replans": self.metrics.num_replans,
@@ -648,6 +768,11 @@ class EndogenousReplanningController:
             "topology_source": self.context.topology_source,
             "oracle_evaluation_only": True,
             "metadata": dict(metadata or {}),
+            "intervention_id": intervention_id,
+            "observed_world_version": (getattr(monitor, "metadata", {}) or {}).get("world_version") if monitor else None,
+            "observed_control_epoch": (getattr(monitor, "metadata", {}) or {}).get("monitor_epoch") if monitor else None,
+            "physical_progression_evidence": delay_metadata.get("physical_advance_receipt"),
+            "post_delay_validation": (getattr(planner_result, "metadata", {}) or {}).get("post_delay_validation") if planner_result else None,
         }
         if decision and decision.delay is not None:
             payload["modeled_decision_delay_sec"] = decision.delay.total_delay_sec
@@ -661,6 +786,52 @@ class EndogenousReplanningController:
 
     def _make_empty_configuration(self) -> PersistentConfiguration:
         return PersistentConfiguration(config_id="config-0", version=0, created_at_sim_time=self.clock.physical_time_sec)
+
+    @staticmethod
+    def _configuration_from_receipt(
+        reference: PersistentConfiguration,
+        receipt: Any,
+    ) -> PersistentConfiguration:
+        """Use the backend's applied configuration as the controller state.
+
+        The planner proposal is only an intent.  When a physical backend
+        returns a structured after-configuration, it is the authoritative
+        state for the next control epoch; this prevents requested values from
+        being mistaken for realized values.
+        """
+
+        if not isinstance(receipt, Mapping):
+            return reference
+        raw = receipt.get("afterConfiguration", receipt.get("after_configuration"))
+        if not isinstance(raw, Mapping):
+            return reference
+        result = reference.clone(
+            config_id=str(raw.get("configId", raw.get("config_id", reference.config_id))),
+            version=_optional_int(raw.get("version")) if _optional_int(raw.get("version")) is not None else reference.version,
+        )
+        for name in (
+            "created_at_sim_time", "applied_at_sim_time", "last_validated_at_sim_time",
+            "source_state_id", "source_decision_id", "assignments", "reusable_rules",
+            "resource_allocations", "cpu_allocations", "bandwidth_allocations", "routes",
+            "priorities", "planner_name", "planner_fidelity", "planning_budget", "metadata",
+        ):
+            camel = {
+                "created_at_sim_time": "creationSimTimeSec",
+                "applied_at_sim_time": "lastUpdateSimTimeSec",
+                "last_validated_at_sim_time": "lastUpdateSimTimeSec",
+                "source_state_id": "sourceStateId",
+                "source_decision_id": "sourceDecisionId",
+                "reusable_rules": "reusableRules",
+                "resource_allocations": "resourceAllocations",
+                "cpu_allocations": "cpuAllocations",
+                "bandwidth_allocations": "bandwidthAllocations",
+            }.get(name, name)
+            if camel in raw:
+                setattr(result, name, raw[camel])
+        result.applied_at_sim_time = float(receipt.get("simulationTimeSec", result.applied_at_sim_time) or result.applied_at_sim_time)
+        result.last_validated_at_sim_time = result.applied_at_sim_time
+        result.metadata = {**result.metadata, "backend_after_configuration": dict(raw)}
+        return result
 
     def _describe_planner(
         self,
@@ -742,11 +913,16 @@ class EndogenousReplanningController:
                 "scope_acquisition_restricted": selective,
                 "budget_acquisition_restricted": budget_aware,
                 "scope_requested": scope.to_dict(),
+                "observation_scope": scope.to_dict(),
+                "modification_scope": scope.to_dict(),
                 "full_state_acquisition_compatibility": not selective,
                 "backend_scope_capability": bool(getattr(physical_capabilities, "supports_scope_aware_planner_state", False)),
                 "backend_budget_capability": bool(getattr(physical_capabilities, "supports_budget_aware_planner_state", False)),
                 "full_state_compatibility_ablation": bool(self.config.ablations.full_state_acquisition_compatibility),
                 "non_authoritative_backend_compatibility": not authoritative,
+                "intervention_id": (monitor_state.metadata or {}).get("intervention_id"),
+                "observed_control_epoch": (monitor_state.metadata or {}).get("monitor_epoch"),
+                "observed_world_version": (monitor_state.metadata or {}).get("world_version"),
                 "future_stochastic_truth_used": False,
             }
         )
@@ -778,7 +954,10 @@ class EndogenousReplanningController:
             config_id=proposed.config_id,
             version=proposed.version,
         )
-        for name in ("assignments", "reusable_rules", "resource_allocations", "routes"):
+        for name in (
+            "assignments", "reusable_rules", "resource_allocations", "cpu_allocations",
+            "bandwidth_allocations", "routes", "priorities",
+        ):
             old = dict(getattr(current, name) or {})
             new = dict(getattr(proposed, name) or {})
             merged = dict(old)
@@ -795,7 +974,69 @@ class EndogenousReplanningController:
         result.metadata = {**current.metadata, **proposed.metadata, "scope_execution_restricted": True}
         return result
 
-    def _apply_backend_configuration(self, configuration: PersistentConfiguration) -> Any:
+    @staticmethod
+    def _configuration_changes(current: PersistentConfiguration, proposed: PersistentConfiguration) -> dict[str, set[str]]:
+        mapping = {
+            "assignments": "task_ids",
+            "reusable_rules": "task_ids",
+            "resource_allocations": "resource_keys",
+            "cpu_allocations": "resource_keys",
+            "bandwidth_allocations": "resource_keys",
+            "priorities": "task_ids",
+            "routes": "route_ids",
+        }
+        changed: dict[str, set[str]] = {field: set() for field in ReconfigurationScope._fields()}
+        for field_name, entity_field in mapping.items():
+            before = dict(getattr(current, field_name) or {})
+            after = dict(getattr(proposed, field_name) or {})
+            for key in set(before) | set(after):
+                if before.get(key) != after.get(key):
+                    changed[entity_field].add(str(key).removeprefix("task:").removeprefix("source:"))
+        return changed
+
+    @classmethod
+    def _assert_modification_scope(
+        cls,
+        current: PersistentConfiguration,
+        proposed: PersistentConfiguration,
+        scope: ReconfigurationScope,
+    ) -> None:
+        changed = cls._configuration_changes(current, proposed)
+        offending: dict[str, list[str]] = {}
+        for field_name, values in changed.items():
+            if not values:
+                continue
+            allowed = getattr(scope, field_name)
+            if field_name == "task_ids":
+                allowed = allowed | scope.source_ids | scope.node_ids
+            if field_name == "route_ids":
+                allowed = allowed | scope.link_ids | scope.resource_keys
+            if field_name == "resource_keys":
+                # SatEdgeSim accepts task/source keyed resource bindings;
+                # these are still in-scope when the enclosing task/source is
+                # selected even if no separate resource key was enumerated.
+                allowed = allowed | scope.task_ids | scope.source_ids | scope.node_ids
+            offending[field_name] = sorted(values - allowed)
+        offending = {key: value for key, value in offending.items() if value}
+        if offending:
+            raise RuntimeError(
+                "Planner proposed changes outside the requested modification scope: "
+                f"{offending}; modification_scope={scope.to_dict()}"
+            )
+
+    def _apply_backend_configuration(
+        self,
+        configuration: PersistentConfiguration,
+        *,
+        modification_scope: ReconfigurationScope | None = None,
+        observation_scope: ReconfigurationScope | None = None,
+        intervention_id: str | None = None,
+        observed_world_version: int | None = None,
+        observed_control_epoch: int | None = None,
+        revalidated_world_version: int | None = None,
+        planning_delay: Mapping[str, Any] | None = None,
+        acquisition_metadata: Mapping[str, Any] | None = None,
+    ) -> Any:
         if not hasattr(self.backend, "apply_configuration"):
             raise RuntimeError("Physical backend does not expose apply_configuration")
         capabilities = getattr(self.backend, "capabilities", None)
@@ -804,8 +1045,49 @@ class EndogenousReplanningController:
                 "Backend does not advertise persistent configuration execution; "
                 "a one-shot action apply cannot stand in for Γ_k persistence"
             )
-        result = self.backend.apply_configuration(configuration)
-        if isinstance(result, Mapping) and "accepted" in result and not bool(result.get("accepted")):
+        patch_method = getattr(self.backend, "apply_configuration_patch", None)
+        patch_capable = bool(getattr(capabilities, "supports_configuration_patch", False))
+        if modification_scope is not None and not modification_scope.is_empty:
+            if callable(patch_method) and patch_capable:
+                result = patch_method(
+                    self.current_configuration,
+                    configuration,
+                    modification_scope,
+                    observation_scope=observation_scope,
+                    preserve_resume_recompute=modification_scope.metadata.get(
+                        "preserve_resume_recompute", self.config.scope.preserve_resume_recompute
+                    ),
+                    acquisition_epoch=self.clock.monitor_epoch,
+                    intervention_id=intervention_id,
+                    observed_world_version=observed_world_version,
+                    observed_control_epoch=observed_control_epoch,
+                    revalidated_world_version=revalidated_world_version,
+                    planning_delay=planning_delay,
+                    acquisition_metadata=acquisition_metadata,
+                )
+            elif bool(getattr(capabilities, "authoritative_physical", False)):
+                raise RuntimeError(
+                    "Authoritative backend cannot apply a scoped intervention: "
+                    "supports_configuration_patch is false"
+                )
+            else:
+                # Existing non-authoritative test/legacy adapters remain
+                # executable, but the receipt is explicitly non-publication.
+                result = self.backend.apply_configuration(configuration)
+                if isinstance(result, Mapping):
+                    result = {**result, "scope_execution_restricted": False, "compatibility_fallback": True}
+        else:
+            result = self.backend.apply_configuration(configuration)
+        # Scoped patch rejection is a first-class physical outcome.  The
+        # caller records its evidence and leaves the active configuration
+        # unchanged.  Full configuration/apply paths retain fail-closed
+        # behavior because they have no selective partial-application proof.
+        if (
+            isinstance(result, Mapping)
+            and "accepted" in result
+            and not bool(result.get("accepted"))
+            and not (modification_scope is not None and not modification_scope.is_empty and patch_capable)
+        ):
             raise RuntimeError(f"Backend rejected persistent configuration apply: {result}")
         self.context.current_config_id = configuration.config_id
         self.context.current_config_version = configuration.version
@@ -820,9 +1102,9 @@ class EndogenousReplanningController:
         """Overlay measured backend-side reconfiguration quantities when present."""
 
         if not isinstance(receipt, Mapping):
-            cost.actual_reconfiguration_bytes = cost.reconfiguration_bytes
-            cost.actual_migration_volume = cost.migration_volume
-            cost.metadata["reconfiguration_receipt_status"] = "not_structured_predicted_used"
+            cost.actual_reconfiguration_bytes = None
+            cost.actual_migration_volume = None
+            cost.metadata["reconfiguration_receipt_status"] = "unverified_no_structured_evidence"
             return
 
         def first_number(*keys: str) -> float | None:
@@ -831,21 +1113,71 @@ class EndogenousReplanningController:
                     try:
                         return float(receipt[key])
                     except (TypeError, ValueError):
+                        if isinstance(receipt[key], (Mapping, list, tuple, set)):
+                            return float(len(receipt[key]))
                         continue
             return None
 
-        actual_bytes = first_number("actualReconfigurationBytes", "actual_reconfiguration_bytes", "reconfigurationBytes")
+        def first_number_from(mapping: Mapping[str, Any], *keys: str) -> float | None:
+            for key in keys:
+                if key not in mapping:
+                    continue
+                value = mapping[key]
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    if isinstance(value, (Mapping, list, tuple, set)):
+                        return float(len(value))
+            return None
+
+        realized_volume = receipt.get("realizedReconfigurationVolume", receipt.get("realized_reconfiguration_volume", {}))
+        if not isinstance(realized_volume, Mapping):
+            realized_volume = {}
+        actual_bytes = first_number(
+            "actualReconfigurationBytes", "actual_reconfiguration_bytes", "reconfigurationBytes",
+        )
+        if actual_bytes is None:
+            for key in ("bytesStateTransferred", "bytes_state_transferred"):
+                if key in realized_volume:
+                    actual_bytes = first_number_from(realized_volume, key)
+                    break
         actual_volume = first_number("actualMigrationVolume", "actual_migration_volume", "migrationVolume")
-        cost.actual_reconfiguration_bytes = int(actual_bytes if actual_bytes is not None else cost.reconfiguration_bytes)
-        cost.actual_migration_volume = float(actual_volume if actual_volume is not None else cost.migration_volume)
+        if actual_volume is None:
+            actual_volume = first_number_from(realized_volume, "migrationVolume", "migration_volume", "normalizedVolume", "normalized_volume")
+        actual_counts: set[str] = set()
         for field_name, keys in {
-            "num_changed_assignments": ("actualChangedAssignments", "actual_changed_assignments"),
-            "num_changed_resources": ("actualChangedResources", "actual_changed_resources"),
-            "num_changed_routes": ("actualChangedRoutes", "actual_changed_routes"),
+            "num_changed_assignments": ("actualChangedAssignments", "actual_changed_assignments", "assignmentChanges", "actuallyChangedTasks"),
+            "num_changed_resources": ("actualChangedResources", "actual_changed_resources", "resourceChanges", "actuallyChangedResources"),
+            "num_changed_routes": ("actualChangedRoutes", "actual_changed_routes", "routeChanges", "actuallyChangedRoutes"),
         }.items():
             value = first_number(*keys)
+            if value is None:
+                value = first_number_from(realized_volume, *keys)
             if value is not None:
                 setattr(cost, field_name, int(value))
+                actual_counts.add(field_name)
+        evidence_keys = {
+            "realizedReconfigurationVolume", "realized_reconfiguration_volume",
+            "realizedScope", "actualChangedEntities", "actual_changed_entities",
+            "actuallyChangedTasks", "actuallyChangedNodes", "actuallyChangedLinks",
+            "actuallyChangedRoutes", "actuallyChangedResources",
+        }
+        verified = bool(
+            receipt.get("accepted") is True
+            and receipt.get("scopeInvariantSatisfied", True) is True
+            and any(key in receipt for key in evidence_keys)
+        )
+        if verified:
+            # A verified zero means the runtime explicitly observed no bytes
+            # or no migration.  It is different from using the estimate.
+            cost.actual_reconfiguration_bytes = int(actual_bytes if actual_bytes is not None else 0)
+            cost.actual_migration_volume = float(actual_volume if actual_volume is not None else 0.0)
+            for field_name in ("num_changed_assignments", "num_changed_resources", "num_changed_routes"):
+                if field_name not in actual_counts:
+                    setattr(cost, field_name, 0)
+        else:
+            cost.actual_reconfiguration_bytes = None
+            cost.actual_migration_volume = None
         discrepancy = {
             "predicted_reconfiguration_bytes": int(predicted.get("reconfiguration_bytes", 0)),
             "actual_reconfiguration_bytes": cost.actual_reconfiguration_bytes,
@@ -854,10 +1186,19 @@ class EndogenousReplanningController:
         }
         cost.metadata.update(
             {
-                "reconfiguration_receipt_status": "verified" if any(
-                    key in receipt
-                    for key in ("actualReconfigurationBytes", "actual_reconfiguration_bytes", "actualMigrationVolume", "actual_migration_volume")
-                ) else "structured_without_measured_diff",
+                "reconfiguration_receipt_status": "verified" if verified else "structured_without_measured_diff",
+                "realized_reconfiguration_evidence": {
+                    "requested_scope": receipt.get("requestedScope", receipt.get("requested_scope")),
+                    "realized_scope": receipt.get("realizedScope", receipt.get("realized_scope")),
+                    "rejected_changes": receipt.get("rejectedChanges", receipt.get("rejected_changes", [])),
+                    "actual_changed_entities": receipt.get("actualChangedEntities", receipt.get("actual_changed_entities", [])),
+                    "realized_volume_primitives": dict(realized_volume),
+                    "configuration_version_before": receipt.get("configurationVersionBefore"),
+                    "configuration_version_after": receipt.get("resultingConfigurationVersion"),
+                    "evidence_id": receipt.get("evidenceId", receipt.get("evidence_id")),
+                    "decision_status": receipt.get("decisionStatus", receipt.get("decision_status")),
+                    "simulation_time_sec": receipt.get("simulationTimeSec"),
+                },
                 "reconfiguration_discrepancy": discrepancy,
             }
         )
@@ -923,3 +1264,11 @@ def _max_mapping(mapping: Mapping[str, Any] | None) -> float:
         except (TypeError, ValueError):
             continue
     return max(values) if values else 0.0
+
+
+def _optional_int(value: Any) -> int | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return int(number) if number.is_integer() else None

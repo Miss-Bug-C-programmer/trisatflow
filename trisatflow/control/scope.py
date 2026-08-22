@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
+import json
 from typing import Any, Iterable, Mapping
 
 
@@ -107,6 +109,137 @@ def _scope_from_typed_mapping(mapping: Mapping[str, Any]) -> "ReconfigurationSco
     return ReconfigurationScope(**payload)
 
 
+@dataclass
+class ViolationProvenance:
+    """Evidence-backed explanation for why an entity entered a scope.
+
+    This is deliberately a small provenance object, not a second scope model.
+    Its entity sets are converted to :class:`ReconfigurationScope` at the
+    canonical candidate-generation boundary.
+    """
+
+    violation_type: str
+    task_ids: set[str] = field(default_factory=set)
+    source_ids: set[str] = field(default_factory=set)
+    node_ids: set[str] = field(default_factory=set)
+    link_ids: set[str] = field(default_factory=set)
+    route_ids: set[str] = field(default_factory=set)
+    resource_keys: set[str] = field(default_factory=set)
+    reason: str = ""
+    evidence: dict[str, Any] = field(default_factory=dict)
+    severity: float | None = None
+    source: str = "monitor"
+
+    def __post_init__(self) -> None:
+        for name in ReconfigurationScope._fields():
+            setattr(self, name, {
+                parsed
+                for value in _normalise(getattr(self, name))
+                if (parsed := _clean_explicit_id(value, _ENTITY_TYPES[name])) is not None
+            })
+        self.violation_type = str(self.violation_type).upper()
+
+    def to_scope(self) -> "ReconfigurationScope":
+        return ReconfigurationScope(**{name: set(getattr(self, name)) for name in ReconfigurationScope._fields()})
+
+    def identity(self) -> str:
+        payload = {
+            "violation_type": self.violation_type,
+            **{name: sorted(getattr(self, name)) for name in ReconfigurationScope._fields()},
+            "reason": self.reason,
+            "evidence": dict(self.evidence),
+            "severity": self.severity,
+            "source": self.source,
+        }
+        return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "violation_type": self.violation_type,
+            **{name: sorted(getattr(self, name)) for name in ReconfigurationScope._fields()},
+            "reason": self.reason,
+            "evidence": dict(self.evidence),
+            "severity": self.severity,
+            "source": self.source,
+            "provenance_id": self.identity() if self.violation_type else "",
+        }
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "ViolationProvenance":
+        aliases = {
+            "affectedTaskIds": "task_ids", "affectedSourceIds": "source_ids",
+            "affectedNodeIds": "node_ids", "affectedLinkIds": "link_ids",
+            "affectedRouteIds": "route_ids", "affectedResourceKeys": "resource_keys",
+            "type": "violation_type", "violationType": "violation_type",
+        }
+        payload: dict[str, Any] = {}
+        for key, item in value.items():
+            payload[aliases.get(key, key)] = item
+        return cls(**{key: item for key, item in payload.items() if key in cls.__dataclass_fields__})
+
+
+# Compatibility name used by external contract/tests.
+ConstraintViolation = ViolationProvenance
+
+
+def extract_constraint_provenance(viability_report: Any, monitor_state: Any | None = None) -> list[ViolationProvenance]:
+    """Read canonical violation provenance without inventing favorable IDs."""
+
+    metadata = getattr(viability_report, "metadata", {}) or {}
+    raw_values: list[Any] = []
+    direct = getattr(viability_report, "constraint_provenance", None)
+    if direct:
+        raw_values.extend(direct)
+    for key in ("constraint_provenance", "violations", "violation_provenance"):
+        value = metadata.get(key) if isinstance(metadata, Mapping) else None
+        if isinstance(value, Iterable) and not isinstance(value, (str, bytes, Mapping)):
+            raw_values.extend(value)
+    result: list[ViolationProvenance] = []
+    seen: set[str] = set()
+    seen_types: set[str] = set()
+    for value in raw_values:
+        item = value if isinstance(value, ViolationProvenance) else (
+            ViolationProvenance.from_mapping(value) if isinstance(value, Mapping) else None
+        )
+        if item is not None and item.identity() not in seen:
+            result.append(item)
+            seen.add(item.identity())
+            seen_types.add(item.violation_type)
+    affected = getattr(viability_report, "affected_entities", ReconfigurationScope())
+    if not isinstance(affected, ReconfigurationScope):
+        affected = ReconfigurationScope(**{k: v for k, v in (affected or {}).items() if k in ReconfigurationScope._fields()})
+    reasons = list(getattr(viability_report, "certificate_failure_reasons", []) or [])
+    reasons.extend(str(value) for value in (getattr(viability_report, "reason_codes", []) or []))
+    reason_map = (
+        ("service", "SERVICE_DEFICIT"), ("deadline", "DEADLINE_DEFICIT"),
+        ("contact", "CONTACT_DEFICIT"), ("queue", "QUEUE_OVERLOAD"),
+        ("resource", "RESOURCE_CONTENTION"), ("uncertainty", "UNCERTAINTY"),
+    )
+    for token, violation_type in reason_map:
+        matching = [reason for reason in reasons if token in reason.lower()]
+        if not matching or violation_type in seen_types:
+            continue
+        item = ViolationProvenance(
+            violation_type=violation_type,
+            task_ids=set(affected.task_ids), source_ids=set(affected.source_ids),
+            node_ids=set(affected.node_ids), link_ids=set(affected.link_ids),
+            route_ids=set(affected.route_ids), resource_keys=set(affected.resource_keys),
+            reason=";".join(sorted(set(matching))),
+            evidence={"monitor_epoch": (getattr(monitor_state, "metadata", {}) or {}).get("monitor_epoch")},
+            source="viability_certificate",
+        )
+        if item.identity() not in seen:
+            result.append(item)
+            seen.add(item.identity())
+            seen_types.add(item.violation_type)
+    if not result and not affected.is_empty and reasons:
+        result.append(ViolationProvenance(
+            violation_type="UNKNOWN", reason=";".join(sorted(set(reasons))),
+            **affected.affected_entities(), source="viability_certificate",
+        ))
+    return result
+
+
 def _typed_metadata_scope(metadata: Mapping[str, Any]) -> "ReconfigurationScope":
     aliases = {
         "affectedTaskIds": "task_ids",
@@ -202,6 +335,7 @@ class ReconfigurationScope:
     link_ids: set[str] = field(default_factory=set)
     route_ids: set[str] = field(default_factory=set)
     resource_keys: set[str] = field(default_factory=set)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         for name in (
@@ -263,13 +397,17 @@ class ReconfigurationScope:
         return any(value in getattr(self, name) for name in self._fields())
 
     def union(self, other: "ReconfigurationScope") -> "ReconfigurationScope":
+        metadata = dict(self.metadata)
+        metadata.update(other.metadata)
         return ReconfigurationScope(
-            **{name: getattr(self, name) | getattr(other, name) for name in self._fields()}
+            **{name: getattr(self, name) | getattr(other, name) for name in self._fields()},
+            metadata=metadata,
         )
 
     def intersection(self, other: "ReconfigurationScope") -> "ReconfigurationScope":
         return ReconfigurationScope(
-            **{name: getattr(self, name) & getattr(other, name) for name in self._fields()}
+            **{name: getattr(self, name) & getattr(other, name) for name in self._fields()},
+            metadata=dict(self.metadata),
         )
 
     def truncate(self, max_entities: int) -> "ReconfigurationScope":
@@ -279,7 +417,7 @@ class ReconfigurationScope:
             values = sorted(getattr(self, name))[:remaining]
             payload[name] = set(values)
             remaining = max(0, remaining - len(values))
-        return ReconfigurationScope(**payload)
+        return ReconfigurationScope(**payload, metadata=dict(self.metadata))
 
     def affected_entities(self) -> dict[str, set[str]]:
         return {name: set(getattr(self, name)) for name in self._fields()}
@@ -296,8 +434,19 @@ class ReconfigurationScope:
             return "medium"
         return "global"
 
-    def to_dict(self) -> dict[str, list[str]]:
-        return {name: sorted(getattr(self, name)) for name in self._fields()}
+    @property
+    def scope_id(self) -> str:
+        explicit = self.metadata.get("scope_id")
+        if explicit:
+            return str(explicit)
+        payload = {name: sorted(getattr(self, name)) for name in self._fields()}
+        return "scope-" + hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {name: sorted(getattr(self, name)) for name in self._fields()}
+        if self.metadata:
+            payload["metadata"] = dict(self.metadata)
+        return payload
 
     @staticmethod
     def _fields() -> tuple[str, ...]:
@@ -342,6 +491,7 @@ class ScopeGenerator:
         planner_state: Any | None,
         viability_report: Any,
     ) -> list[ReconfigurationScope]:
+        provenance = extract_constraint_provenance(viability_report, monitor_state)
         base = getattr(viability_report, "affected_entities", None)
         if isinstance(base, ReconfigurationScope):
             impacted = base
@@ -352,20 +502,33 @@ class ScopeGenerator:
 
         candidates: list[ReconfigurationScope] = []
         if not impacted.is_empty:
-            candidates.append(self._limit(impacted))
+            direct = ReconfigurationScope()
+            for item in provenance:
+                direct = direct.union(item.to_scope())
+            direct = direct if not direct.is_empty else impacted
+            candidates.append(self._annotate(self._limit(direct), provenance, "minimal_direct_implication"))
 
             graph = {}
             metadata = getattr(viability_report, "metadata", {}) or {}
             if isinstance(metadata, Mapping):
                 graph = metadata.get("dependency_graph", {}) or {}
-            expanded = self._expand_dependencies(impacted, graph)
-            if expanded != impacted:
-                candidates.append(self._limit(expanded))
+            expanded = self._expand_dependencies(direct, graph)
+            if expanded != direct:
+                candidates.append(self._annotate(
+                    self._limit(expanded), provenance, "dependency_expansion",
+                    extra_provenance=[ViolationProvenance(
+                        violation_type="DEPENDENCY_EXPANSION", reason="typed_dependency_graph",
+                        **expanded.intersection(self._limit(expanded)).affected_entities(), source="scope_generator"
+                    )],
+                ))
 
-        if self.include_global_candidate:
+        # A wider candidate is only meaningful after a directly implicated
+        # entity exists.  Missing provenance must not be converted into an
+        # implicit global refresh.
+        if self.include_global_candidate and not impacted.is_empty:
             global_scope = self._global_scope(current_config, planner_state)
             if not global_scope.is_empty:
-                candidates.append(self._limit(global_scope))
+                candidates.append(self._annotate(self._limit(global_scope), provenance, "wider_repair_allowed"))
 
         unique: list[ReconfigurationScope] = []
         seen: set[tuple[tuple[str, tuple[str, ...]], ...]] = set()
@@ -375,6 +538,33 @@ class ScopeGenerator:
                 seen.add(key)
                 unique.append(scope)
         return unique[: self.max_candidate_scopes]
+
+    @staticmethod
+    def _annotate(
+        scope: ReconfigurationScope,
+        provenance: list[ViolationProvenance],
+        expansion_reason: str,
+        *,
+        extra_provenance: list[ViolationProvenance] | None = None,
+    ) -> ReconfigurationScope:
+        all_provenance = [*(provenance or []), *(extra_provenance or [])]
+        required = [name for name in ReconfigurationScope._fields() if getattr(scope, name)]
+        metadata = {
+            "scope_id": scope.scope_id,
+            "provenance": [item.to_dict() for item in all_provenance],
+            "expansion_reason": expansion_reason,
+            "size_primitives": {name: len(getattr(scope, name)) for name in ReconfigurationScope._fields()},
+            "estimated_recoverability": None,
+            "required_acquisition_components": required,
+            "preserve_resume_recompute": {"preserve": True, "resume": True, "recompute": False},
+        }
+        metadata["scope_id"] = "scope-" + hashlib.sha256(
+            json.dumps({name: sorted(getattr(scope, name)) for name in scope._fields()} | {
+                "provenance": [item.identity() for item in all_provenance],
+                "reason": expansion_reason,
+            }, sort_keys=True).encode("utf-8")
+        ).hexdigest()[:16]
+        return ReconfigurationScope(**scope.affected_entities(), metadata=metadata)
 
     def _limit(self, scope: ReconfigurationScope) -> ReconfigurationScope:
         if self.max_scope_entities is None:
@@ -388,12 +578,33 @@ class ScopeGenerator:
     @staticmethod
     def _expand_dependencies(scope: ReconfigurationScope, graph: Mapping[str, Any]) -> ReconfigurationScope:
         expanded = scope
-        for entity, neighbours in graph.items():
+        for entity, neighbours in sorted(graph.items(), key=lambda item: str(item[0])):
             if not isinstance(neighbours, Iterable) or isinstance(neighbours, (str, bytes)):
                 continue
-            if scope.contains(entity):
-                expanded = expanded.union(ReconfigurationScope(node_ids={str(v) for v in neighbours}))
+            if ScopeGenerator._scope_contains_graph_entity(scope, str(entity)):
+                for value in sorted((str(v) for v in neighbours), key=str):
+                    expanded = expanded.union(ScopeGenerator._typed_entity_scope(value))
         return expanded
+
+    @staticmethod
+    def _scope_contains_graph_entity(scope: ReconfigurationScope, value: str) -> bool:
+        lowered = value.lower()
+        for entity_type in ("task", "source", "node", "link", "route", "resource"):
+            if lowered.startswith((f"{entity_type}:", f"{entity_type}_id:", f"{entity_type}id:")):
+                parsed = _clean_explicit_id(value, entity_type)
+                return bool(parsed and scope.contains(parsed, entity_type))
+        return scope.contains(value)
+
+    @staticmethod
+    def _typed_entity_scope(value: str) -> ReconfigurationScope:
+        text = str(value)
+        lowered = text.lower()
+        for entity_type, field_name in (("task", "task_ids"), ("source", "source_ids"), ("node", "node_ids"),
+                                        ("link", "link_ids"), ("route", "route_ids"), ("resource", "resource_keys")):
+            if lowered.startswith((f"{entity_type}:", f"{entity_type}_id:", f"{entity_type}id:")):
+                parsed = _clean_explicit_id(text, entity_type)
+                return ReconfigurationScope(**{field_name: {parsed}}) if parsed else ReconfigurationScope()
+        return ReconfigurationScope(node_ids={text}) if text else ReconfigurationScope()
 
     @staticmethod
     def _global_scope(current_config: Any, planner_state: Any | None) -> ReconfigurationScope:

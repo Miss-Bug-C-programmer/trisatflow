@@ -270,6 +270,11 @@ def _metric_candidates(metric: str) -> List[str]:
         candidates.append(metric[:-len("_mean")])
     if metric == "final_normalized_system_cost":
         candidates.append("normalized_system_cost")
+        # Oracle summaries produced by the existing small-scale upper-bound
+        # runner use the older explicit-final-mean field.  Ingest it as a
+        # compatibility alias; callers that request the deprecated metric
+        # name explicitly are still rejected above unless they opt in.
+        candidates.extend(["final_mean_system_cost", "mean_system_cost"])
     return list(dict.fromkeys(candidates))
 
 

@@ -24,6 +24,9 @@ class SatEdgeSimBackend:
     def __post_init__(self) -> None:
         self._last_state: dict[str, Any] = {}
         self._configuration: PersistentConfiguration | None = None
+        self._observed_world_version: int | None = None
+        self._observed_control_epoch: int | None = None
+        self._last_revalidated_world_version: int | None = None
         self._capabilities = self._detect_capabilities()
 
     @property
@@ -37,6 +40,9 @@ class SatEdgeSimBackend:
         # the current controller state during the next monitor epoch.
         self._last_state = {}
         self._configuration = None
+        self._observed_world_version = None
+        self._observed_control_epoch = None
+        self._last_revalidated_world_version = None
         return result
 
     def current_time(self) -> float:
@@ -59,7 +65,18 @@ class SatEdgeSimBackend:
             source = "compatibility_preflight"
             true_cheap = False
         self._last_state = dict(state)
-        return self._monitor_from_payload(state, source=source, true_cheap=true_cheap)
+        cached = state.get("cachedState", {}) if isinstance(state.get("cachedState", {}), Mapping) else {}
+        self._observed_world_version = _optional_int(
+            state.get("worldVersion", state.get("world_version", cached.get("worldVersion")))
+        )
+        context_clock = getattr(getattr(context, "clock", None), "monitor_epoch", None)
+        self._observed_control_epoch = _optional_int(
+            state.get("controlEpoch", state.get("control_epoch", state.get("monitorEpoch", context_clock)))
+        )
+        monitor = self._monitor_from_payload(state, source=source, true_cheap=true_cheap)
+        monitor.metadata["world_version"] = self._observed_world_version
+        monitor.metadata["observed_control_epoch"] = self._observed_control_epoch
+        return monitor
 
     def get_planner_state(self, context: Any | None = None, scope: Any | None = None, budget: Any | None = None) -> PlannerState:
         context_metadata = getattr(context, "metadata", {}) or {}
@@ -141,6 +158,93 @@ class SatEdgeSimBackend:
         self._configuration = configuration
         return result
 
+    def apply_configuration_patch(
+        self,
+        current_configuration: PersistentConfiguration,
+        proposed_configuration: PersistentConfiguration,
+        modification_scope: Any,
+        *,
+        observation_scope: Any | None = None,
+        preserve_resume_recompute: Mapping[str, Any] | None = None,
+        acquisition_epoch: int | None = None,
+        intervention_id: str | None = None,
+        observed_world_version: int | None = None,
+        observed_control_epoch: int | None = None,
+        revalidated_world_version: int | None = None,
+        planning_delay: Mapping[str, Any] | None = None,
+        acquisition_metadata: Mapping[str, Any] | None = None,
+    ) -> Mapping[str, Any]:
+        """Apply the exact ΔΠ through SatEdgeSim's native patch executor."""
+
+        if not self.capabilities.supports_configuration_patch:
+            raise SatEdgeSimCapabilityError(
+                "SatEdgeSim does not advertise the versioned configuration-patch contract"
+            )
+        if current_configuration is None:
+            raise SatEdgeSimCapabilityError("A configuration patch requires a non-null base configuration")
+        changes = _configuration_patch_changes(current_configuration, proposed_configuration)
+        observed_world_version = (
+            observed_world_version
+            if observed_world_version is not None
+            else getattr(self, "_observed_world_version", None)
+        )
+        observed_control_epoch = (
+            observed_control_epoch
+            if observed_control_epoch is not None
+            else getattr(self, "_observed_control_epoch", None)
+        )
+        if observed_world_version is None:
+            observed_world_version = _optional_int(
+                getattr(self, "_last_state", {}).get("worldVersion", getattr(self, "_last_state", {}).get("world_version"))
+            )
+        payload = {
+            "baseConfigurationVersion": int(current_configuration.version),
+            "baseWorldVersion": observed_world_version,
+            "observedWorldVersion": observed_world_version,
+            "observedControlEpoch": observed_control_epoch,
+            "revalidatedWorldVersion": revalidated_world_version if revalidated_world_version is not None else getattr(self, "_last_revalidated_world_version", None),
+            "acquisitionEpoch": acquisition_epoch,
+            "requestedScope": _to_dict(modification_scope),
+            "observationScope": _to_dict(observation_scope) if observation_scope is not None else {},
+            **changes,
+            "preserveResumeRecompute": dict(preserve_resume_recompute or {}),
+            "originatingPlannerId": proposed_configuration.planner_name,
+            "originatingInterventionId": intervention_id or proposed_configuration.source_decision_id,
+            "provenance": dict(proposed_configuration.metadata.get("provenance", {}) or {}),
+            "planningDelayMetadata": dict(planning_delay or {}),
+            "acquisitionMetadata": dict(acquisition_metadata or {}),
+            "strict": bool(self.capabilities.authoritative_physical),
+        }
+        result = self.client._request("POST", "/configuration/patch", json=payload)
+        if not isinstance(result, Mapping):
+            raise SatEdgeSimCapabilityError("SatEdgeSim configuration patch returned a non-structured receipt")
+        if "accepted" not in result:
+            raise SatEdgeSimCapabilityError("SatEdgeSim configuration patch omitted mandatory accepted evidence")
+        if not bool(result.get("accepted")):
+            # Rejection is an evidence-bearing intervention outcome.  The
+            # controller keeps the active configuration and records this
+            # structured response instead of converting it into a transport
+            # exception.
+            return result
+        applied = proposed_configuration
+        after = result.get("afterConfiguration", result.get("after_configuration"))
+        if isinstance(after, Mapping):
+            after_version = _optional_int(after.get("version"))
+            applied = proposed_configuration.clone(
+                config_id=str(after.get("configId", after.get("config_id", proposed_configuration.config_id))),
+                version=after_version if after_version is not None else proposed_configuration.version,
+            )
+            for name, key in {
+                "assignments": "assignments", "reusable_rules": "reusableRules",
+                "resource_allocations": "resourceAllocations", "cpu_allocations": "cpuAllocations",
+                "bandwidth_allocations": "bandwidthAllocations", "routes": "routes",
+                "priorities": "priorities", "metadata": "metadata",
+            }.items():
+                if key in after and isinstance(after[key], Mapping):
+                    setattr(applied, name, dict(after[key]))
+        self._configuration = applied
+        return result
+
     def dispatch_under_configuration(self, configuration: PersistentConfiguration, task: Any | None = None) -> Mapping[str, Any]:
         if not self.capabilities.supports_configuration_dispatch:
             raise SatEdgeSimCapabilityError(
@@ -191,17 +295,53 @@ class SatEdgeSimBackend:
             raise SatEdgeSimCapabilityError("control epoch resume returned a non-structured receipt")
         return result
 
-    def validate_configuration(self, configuration: PersistentConfiguration) -> Mapping[str, Any]:
+    def validate_configuration(
+        self,
+        configuration: PersistentConfiguration,
+        *,
+        current_configuration: PersistentConfiguration | None = None,
+        scope: Any | None = None,
+        observed_world_version: int | None = None,
+        observed_control_epoch: int | None = None,
+        planning_delay: Mapping[str, Any] | None = None,
+        intervention_id: str | None = None,
+    ) -> Mapping[str, Any]:
         if not self.capabilities.supports_configuration_validation:
             raise SatEdgeSimCapabilityError(
                 "SatEdgeSim v22 exposes no configuration validation endpoint; "
                 "post-delay acceptance cannot be claimed"
             )
-        result = self.client._request(
-            "POST", "/configuration/validate", json={"configuration": configuration.to_dict()}
-        )
+        if current_configuration is not None and scope is not None and self.capabilities.supports_configuration_patch:
+            try:
+                runtime = dict(self.client._request("GET", "/configuration/current") or {})
+            except Exception:
+                runtime = {}
+            current_world = _optional_int(runtime.get("worldVersion", runtime.get("world_version")))
+            if current_world is None:
+                current_world = self._observed_world_version
+            changes = _configuration_patch_changes(current_configuration, configuration)
+            payload = {
+                "baseConfigurationVersion": int(current_configuration.version),
+                "baseWorldVersion": current_world,
+                "observedWorldVersion": observed_world_version if observed_world_version is not None else self._observed_world_version,
+                "observedControlEpoch": observed_control_epoch if observed_control_epoch is not None else self._observed_control_epoch,
+                "revalidatedWorldVersion": current_world,
+                "requestedScope": _to_dict(scope),
+                **changes,
+                "planningDelayMetadata": dict(planning_delay or {}),
+                "originatingInterventionId": intervention_id,
+                "strict": bool(self.capabilities.authoritative_physical),
+            }
+            result = self.client._request("POST", "/configuration/validate", json=payload)
+        else:
+            result = self.client._request(
+                "POST", "/configuration/validate", json={"configuration": configuration.to_dict()}
+            )
         if not isinstance(result, Mapping):
             raise SatEdgeSimCapabilityError("SatEdgeSim configuration validation returned a non-structured receipt")
+        self._last_revalidated_world_version = _optional_int(
+            result.get("worldVersion", result.get("world_version"))
+        )
         return result
 
     def metadata(self) -> dict[str, Any]:
@@ -232,6 +372,8 @@ class SatEdgeSimBackend:
                     supports_contact_plan=bool(declared.get("supportsContactPlan", False)),
                     supports_topology_snapshot=bool(declared.get("supportsTopologySnapshot", False)),
                     supports_configuration_apply=bool(declared.get("supportsConfigurationApply", False)),
+                    supports_configuration_patch=bool(declared.get("supportsConfigurationPatch", False)),
+                    supports_scope_aware_configuration_patch=bool(declared.get("supportsConfigurationPatch", False)),
                     supports_persistent_configuration=bool(declared.get("supportsPersistentConfigurationExecution", False)),
                     supports_persistent_configuration_execution=bool(declared.get("supportsPersistentConfigurationExecution", False)),
                     supports_persistent_native_resource_actuation=bool(declared.get("supportsPersistentNativeResourceActuation", False)),
@@ -266,6 +408,7 @@ class SatEdgeSimBackend:
             "/topology/contact_plan": self._endpoint_available("/topology/contact_plan", method="POST"),
             "/topology/current": self._endpoint_available("/topology/current", method="GET"),
             "/configuration/apply": self._endpoint_available("/configuration/apply", method="POST"),
+            "/configuration/patch": self._endpoint_available("/configuration/patch", method="POST"),
             "/configuration/dispatch": self._endpoint_available("/configuration/dispatch", method="POST"),
             "/configuration/validate": self._endpoint_available("/configuration/validate", method="POST"),
             "/advance_world": self._endpoint_available("/advance_world", method="POST"),
@@ -281,6 +424,8 @@ class SatEdgeSimBackend:
             supports_contact_plan=endpoints["/topology/contact_plan"],
             supports_topology_snapshot=endpoints["/topology/current"],
             supports_configuration_apply=endpoints["/configuration/apply"],
+            supports_configuration_patch=endpoints["/configuration/patch"],
+            supports_scope_aware_configuration_patch=endpoints["/configuration/patch"],
             supports_persistent_configuration=(endpoints["/configuration/apply"] and endpoints["/configuration/dispatch"]),
             supports_persistent_configuration_execution=(endpoints["/configuration/apply"] and endpoints["/configuration/dispatch"]),
             supports_configuration_dispatch=endpoints["/configuration/dispatch"],
@@ -497,6 +642,8 @@ class SatEdgeSimBackend:
                 "expected_config_version": expected_config_version,
                 "observed_config_id": observed_config_id,
                 "observed_config_version": observed_config_version_int,
+                "world_version": state.get("worldVersion", state.get("world_version")),
+                "monitor_epoch": state.get("monitorEpoch", state.get("monitor_epoch")),
                 "service_rate_observed_available": service_rate_observed is not None,
                 "service_rate_lower_bound_available": service_rate_lower_bound is not None,
                 "service_bound_certified": service_bound_certified,
@@ -528,6 +675,43 @@ class SatEdgeSimBackend:
                 },
             },
         )
+
+def _configuration_patch_changes(current: PersistentConfiguration, proposed: PersistentConfiguration) -> dict[str, Any]:
+    def delta(name: str) -> dict[str, Any]:
+        before = dict(getattr(current, name, {}) or {})
+        after = dict(getattr(proposed, name, {}) or {})
+        return {
+            # SatEdgeSim's ConfigurationPatch maps carry the requested
+            # after-value.  The base version/world version provide stale
+            # protection; sending audit wrappers as values would change the
+            # native assignment/resource schema.
+            str(key): after.get(key)
+            for key in sorted(set(before) | set(after))
+            if before.get(key) != after.get(key)
+        }
+
+    resource_changes = delta("resource_allocations")
+    cpu_changes = delta("cpu_allocations")
+    bandwidth_changes = delta("bandwidth_allocations")
+    # Existing planners store native resource shares in the resource map.  A
+    # patch carries the generic resource delta and the dimension-specific
+    # deltas when the backend contract can consume them.
+    for key, change in resource_changes.items():
+        value = change.get("after")
+        if isinstance(value, Mapping):
+            if any(token in {str(k).lower() for k in value} for token in ("cpu", "cpushare", "mips")):
+                cpu_changes.setdefault(key, change)
+            if any(token in {str(k).lower() for k in value} for token in ("bw", "bandwidth", "bandwidthshare")):
+                bandwidth_changes.setdefault(key, change)
+    return {
+        "taskAssignmentChanges": delta("assignments"),
+        "routeChanges": delta("routes"),
+        "resourceChanges": resource_changes,
+        "cpuAllocationChanges": cpu_changes,
+        "bandwidthAllocationChanges": bandwidth_changes,
+        "priorityChanges": delta("priorities"),
+        "persistentRuleChanges": delta("reusable_rules"),
+    }
 
 
 def _is_number(value: Any) -> bool:

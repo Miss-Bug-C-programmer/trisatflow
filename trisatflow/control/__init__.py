@@ -28,8 +28,8 @@ from trisatflow.control.benefit import (
     PlannerPerformanceProfile,
 )
 from trisatflow.control.persistent_configuration import PersistentConfiguration
-from trisatflow.control.scope import ReconfigurationScope, ScopeGenerator
-from trisatflow.control.viability import ConservativeViabilityEstimator, ViabilityReport
+from trisatflow.control.scope import ConstraintViolation, ReconfigurationScope, ScopeGenerator, ViolationProvenance
+from trisatflow.control.viability import ConservativeViabilityEstimator, SoftPerformanceRisk, ViabilityCertificate, ViabilityReport
 from trisatflow.control.controller import ControlDecision, EndogenousReplanningController
 from trisatflow.control.config import ControllerConfig
 from trisatflow.control.decision_cost import DecisionCostBreakdown
@@ -63,9 +63,13 @@ __all__ = [
     "PlanningBudget",
     "ReconfigurationScope",
     "ScopeGenerator",
+    "ViolationProvenance",
+    "ConstraintViolation",
     "PostDelayRevalidator",
     "SMDPTransition",
     "OutcomeEstimate",
     "PlannerPerformanceProfile",
     "ViabilityReport",
+    "ViabilityCertificate",
+    "SoftPerformanceRisk",
 ]

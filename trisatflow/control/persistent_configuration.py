@@ -25,7 +25,10 @@ class PersistentConfiguration:
     # reusable for tasks that have not been enumerated at configuration time.
     reusable_rules: dict[str, Any] = field(default_factory=dict)
     resource_allocations: dict[str, Any] = field(default_factory=dict)
+    cpu_allocations: dict[str, Any] = field(default_factory=dict)
+    bandwidth_allocations: dict[str, Any] = field(default_factory=dict)
     routes: dict[str, Any] = field(default_factory=dict)
+    priorities: dict[str, Any] = field(default_factory=dict)
     covered_task_ids: set[str] = field(default_factory=set)
     covered_source_ids: set[str] = field(default_factory=set)
     covered_node_ids: set[str] = field(default_factory=set)
@@ -62,7 +65,7 @@ class PersistentConfiguration:
         if not isinstance(other, PersistentConfiguration):
             raise TypeError("diff expects another PersistentConfiguration")
         changed: dict[str, Any] = {}
-        for name in ("assignments", "reusable_rules", "resource_allocations", "routes"):
+        for name in ("assignments", "reusable_rules", "resource_allocations", "cpu_allocations", "bandwidth_allocations", "routes", "priorities"):
             before = getattr(self, name)
             after = getattr(other, name)
             if before != after:
@@ -105,21 +108,30 @@ class PersistentConfiguration:
         assignments, assignment_universe = mapping_changes("assignments")
         rules, rule_universe = mapping_changes("reusable_rules")
         resources, resource_universe = mapping_changes("resource_allocations")
+        cpu_allocations, cpu_universe = mapping_changes("cpu_allocations")
+        bandwidth_allocations, bandwidth_universe = mapping_changes("bandwidth_allocations")
         routes, route_universe = mapping_changes("routes")
+        priorities, priority_universe = mapping_changes("priorities")
         diff = self.diff(other)
         encoded = json.dumps(diff, default=str, sort_keys=True, separators=(",", ":"))
         return {
             "num_changed_assignments": assignments,
             "num_changed_reusable_rules": rules,
             "num_changed_resources": resources,
+            "num_changed_cpu_allocations": cpu_allocations,
+            "num_changed_bandwidth_allocations": bandwidth_allocations,
             "num_changed_routes": routes,
+            "num_changed_priorities": priorities,
             "reconfiguration_bytes": len(encoded.encode("utf-8")) if diff else 0,
             "migration_volume": self.reconfiguration_volume(other),
             "changed_field_count": len(diff),
             "assignment_universe": assignment_universe,
             "rule_universe": rule_universe,
             "resource_universe": resource_universe,
+            "cpu_universe": cpu_universe,
+            "bandwidth_universe": bandwidth_universe,
             "route_universe": route_universe,
+            "priority_universe": priority_universe,
             "diff": diff,
         }
 
@@ -168,7 +180,7 @@ class PersistentConfiguration:
         entity_count = max(1, entity_scope.cardinality)
         changed_count = sum(
             1
-            for name in ("assignments", "reusable_rules", "resource_allocations", "routes")
+            for name in ("assignments", "reusable_rules", "resource_allocations", "cpu_allocations", "bandwidth_allocations", "routes", "priorities")
             if name in changed
         )
         return min(1.0, max(changed_count, entity_count) / max(entity_count, 1))

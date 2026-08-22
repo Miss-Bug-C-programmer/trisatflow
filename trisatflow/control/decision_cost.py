@@ -26,8 +26,8 @@ class DecisionCostBreakdown:
     num_changed_assignments: int = 0
     num_changed_resources: int = 0
     num_changed_routes: int = 0
-    actual_reconfiguration_bytes: int = 0
-    actual_migration_volume: float = 0.0
+    actual_reconfiguration_bytes: int | None = None
+    actual_migration_volume: float | None = None
     obs_price: float = 1.0
     sync_price: float = 1.0
     solve_price: float = 1.0
@@ -107,17 +107,30 @@ class DecisionCostBreakdown:
         )
 
     @property
-    def reconfiguration_cost(self) -> float:
-        measured = (self.metadata or {}).get("reconfiguration_receipt_status") == "verified"
-        bytes_value = self.actual_reconfiguration_bytes if measured else self.reconfiguration_bytes
-        volume_value = self.actual_migration_volume if measured else self.migration_volume
+    def estimated_reconfiguration_cost(self) -> float:
         return (
-            self._price(self.reconfiguration_byte_price, self.reconfiguration_price) * float(bytes_value)
-            + self._price(self.reconfiguration_volume_price, self.reconfiguration_price) * volume_value
+            self._price(self.reconfiguration_byte_price, self.reconfiguration_price) * float(self.reconfiguration_bytes)
+            + self._price(self.reconfiguration_volume_price, self.reconfiguration_price) * float(self.migration_volume)
             + self._price(self.reconfiguration_assignment_price, self.reconfiguration_price) * self.num_changed_assignments
             + self._price(self.reconfiguration_resource_price, self.reconfiguration_price) * self.num_changed_resources
             + self._price(self.reconfiguration_route_price, self.reconfiguration_price) * self.num_changed_routes
         )
+
+    @property
+    def realized_reconfiguration_cost(self) -> float | None:
+        if (self.metadata or {}).get("reconfiguration_receipt_status") != "verified":
+            return None
+        return (
+            self._price(self.reconfiguration_byte_price, self.reconfiguration_price) * float(self.actual_reconfiguration_bytes or 0)
+            + self._price(self.reconfiguration_volume_price, self.reconfiguration_price) * float(self.actual_migration_volume or 0.0)
+            + self._price(self.reconfiguration_assignment_price, self.reconfiguration_price) * self.num_changed_assignments
+            + self._price(self.reconfiguration_resource_price, self.reconfiguration_price) * self.num_changed_resources
+            + self._price(self.reconfiguration_route_price, self.reconfiguration_price) * self.num_changed_routes
+        )
+
+    @property
+    def reconfiguration_cost(self) -> float:
+        return self.realized_reconfiguration_cost if self.realized_reconfiguration_cost is not None else self.estimated_reconfiguration_cost
 
     @staticmethod
     def _price(specific: float | None, legacy: float) -> float:
@@ -169,7 +182,12 @@ class DecisionCostBreakdown:
             "num_changed_assignments", "num_changed_resources", "num_changed_routes", "actual_reconfiguration_bytes", "actual_migration_volume",
         )
         for name in raw_fields:
-            setattr(result, name, getattr(self, name) + getattr(other, name))
+            left = getattr(self, name)
+            right = getattr(other, name)
+            if name in {"actual_reconfiguration_bytes", "actual_migration_volume"}:
+                setattr(result, name, left + right if left is not None and right is not None else None)
+            else:
+                setattr(result, name, left + right)
         for name in (
             "obs_price", "sync_price", "solve_price", "signal_price", "reconfiguration_price",
             "observation_byte_price", "observation_latency_price", "observation_energy_price",
@@ -209,6 +227,8 @@ class DecisionCostBreakdown:
                 "signal_cost": self.signal_cost,
                 "decision_cost": self.decision_cost,
                 "reconfiguration_cost": self.reconfiguration_cost,
+                "estimated_reconfiguration_cost": self.estimated_reconfiguration_cost,
+                "realized_reconfiguration_cost": self.realized_reconfiguration_cost,
                 "intervention_cost": self.intervention_cost,
                 "price_provenance": self.price_provenance,
                 "units": dict(self.units),
@@ -235,7 +255,7 @@ class ResourceBudgetState:
         duration = max(float(holding_time_sec), 1.0e-9)
         energy = float(cost.observation_energy + cost.sync_energy + cost.solver_energy_proxy + cost.signal_energy)
         measured = (cost.metadata or {}).get("reconfiguration_receipt_status") == "verified"
-        reconfiguration_bytes = cost.actual_reconfiguration_bytes if measured else cost.reconfiguration_bytes
+        reconfiguration_bytes = (cost.actual_reconfiguration_bytes or 0) if measured else cost.reconfiguration_bytes
         control_bytes = float(cost.observation_bytes + cost.sync_bytes + cost.signal_bytes + reconfiguration_bytes)
         compute = float(cost.solver_compute_proxy)
         self.last_consumption = {
